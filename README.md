@@ -48,7 +48,9 @@ decompressed from `.fa.gz` and its nucleotide BLAST DB built (job 1106909). Prot
 downloaded from `download.maizegdb.org/<assembly>/` (RIL003: translated from the Helixer GFF with
 `gffread -y`), indexed with `samtools faidx` and `makeblastdb -dbtype prot -parse_seqids`
 (job 1106876, xfer partition). TE annotations (MaizeGDB EDTA GFFs) downloaded next to each genome and
-stored coordinate-sorted, bgzipped and tabix-indexed (job 1108482). The prep scripts are not part of
+stored coordinate-sorted, bgzipped and tabix-indexed (job 1108482). The PI615697 EDTA file names
+sequences by number (the genome name without its `chr`/`ctg_`/`alt-ctg_` prefix); a renamed copy
+(`..._EDTA.renamed.sorted.gff3.gz`) is used (job 1108695). The prep scripts are not part of
 this repo.
 
 Laptop stub inputs (B73 + TIL18, ±200 kb around each gene) are in `tests/fixtures/`, made by

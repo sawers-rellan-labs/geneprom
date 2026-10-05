@@ -325,6 +325,9 @@ writeXStringSet(AAStringSet(setNames(tp$prot, sprintf("t%03d", seq_len(nrow(tp))
 sh(sprintf("mafft --auto --quiet %s > %s", shQuote(pfa), shQuote(afa)))
 sh(sprintf("FastTree -lg -quiet %s > %s", shQuote(afa), shQuote(nwk)))
 tr <- read.tree(nwk); tr$tip.label <- tp$tip[as.integer(sub("^t", "", tr$tip.label))]
+# the protein alignment behind the tree, with the tip labels as FASTA names (for an alignment viewer)
+aa <- readAAStringSet(afa); names(aa) <- tp$tip[as.integer(sub("^t", "", names(aa)))]
+writeXStringSet(aa, file.path(RES, "ferredoxin_tree.aln.faa"))
 out_tip <- grep("^ZmFd7 ", tr$tip.label, value = TRUE)
 if (length(out_tip)) tr <- root(tr, outgroup = out_tip, resolve.root = TRUE)
 write.tree(tr, nwk)
