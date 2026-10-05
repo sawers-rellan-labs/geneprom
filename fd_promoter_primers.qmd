@@ -607,48 +607,114 @@ knitr::kable(final %>% transmute(name, forward = F_seq, reverse = R_seq, `F Tm` 
 if (!nrow(final)) message("No pair passed: see the e-PCR table above.")
 ```
 
-## 9b. Amplicons aligned to B73
+## 9b. Annotation maps of the products
 
-Every e-PCR product of each recommended pair, in every genome — own locus, second (`alt`) haplotype,
-and any off-locus product — aligned (`blastn`) to the **B73 product** and drawn on B73 coordinates.
-Blocks = sequence shared with B73 (colour = % identity); a gap between blocks = sequence missing
-relative to B73 (e.g. InDel194 in ZmFd4 Hap2 accessions); dashed lines = primer sites. A haplotype
-with no track gave no product.
+One figure per recommended pair, one track per whole-genome e-PCR product (own locus, second `alt`
+haplotype, and any off-locus product), as in the `primermu` / `primercrisp` annotation maps.
+Window = product ± 150 bp; minus-strand products are flipped so the forward primer is always
+leftmost (primer orientation, not genome orientation). Tracks, bottom to top:
 
-```{r amplicons, fig.height=6}
-amp_track <- function(r) {
-  sfx <- case_when(r$hit_at == "own locus" ~ "", r$hit_at == "alt haplotype" ~ " alt",
-                   TRUE ~ sprintf(" %s:%.1f Mb (%s)", r$seq, r$from / 1e6, tolower(r$hit_at)))
-  paste0(taxon_prefix(r$genome), sfx)
+- **homology** to the other products (computed: each window is blastn'd against the others,
+  `-word_size 9`, no dust; overlapping HSPs merged, blocks ≥ 40 bp drawn) — a gap shows sequence
+  the others lack, e.g. InDel194 present only in B73;
+- **exons** of any gene overlapping the window (gene model ID);
+- the **primer sites** (arrows, labelled with mismatches) and the **product** (green = expected,
+  red = off-target with matching 3′ ends, grey = off-target with a 3′ mismatch).
+
+```{r annotation-maps, fig.height=10}
+PADP <- 150L
+empty_feat <- tibble(seq_id = character(), start = integer(), end = integer(), feat_type = character(), name = character())
+merge_iv <- function(d) {                                   # merge overlapping/abutting HSPs on the query
+  d <- d %>% arrange(qstart); out <- list(); cur <- NULL
+  for (k in seq_len(nrow(d))) {
+    if (is.null(cur)) cur <- list(s = d$qstart[k], e = d$qend[k], p = d$pident[k], subj = d$s[k])
+    else if (d$qstart[k] <= cur$e + 1L) { cur$e <- max(cur$e, d$qend[k]); cur$p <- c(cur$p, d$pident[k]); cur$subj <- c(cur$subj, d$s[k]) }
+    else { out[[length(out) + 1L]] <- cur; cur <- list(s = d$qstart[k], e = d$qend[k], p = d$pident[k], subj = d$s[k]) }
+  }
+  if (!is.null(cur)) out[[length(out) + 1L]] <- cur
+  bind_rows(lapply(out, function(z) tibble(start = z$s, end = z$e, n_copies = n_distinct(z$subj), pmax = max(z$p))))
 }
-amp_plot <- function(pr) {
-  e <- ep %>% filter(name == pr$name) %>% mutate(track = map_chr(seq_len(n()), ~ amp_track(cur_data_all()[.x, ])))
-  e$sq <- map(seq_len(nrow(e)), function(k) grab(e$genome[k], e$seq[k], e$from[k], e$to[k] + 1L, e$strand[k] == "-"))
-  ref_k <- which(e$genome == "B73" & e$hit_at == "own locus")[1]
-  rf <- tempfile(fileext = ".fa"); writeXStringSet(DNAStringSet(setNames(list(e$sq[[ref_k]]), "B73")), rf)
-  blk <- map_dfr(seq_len(nrow(e)), function(k) {
-    qf <- tempfile(fileext = ".fa"); writeXStringSet(DNAStringSet(setNames(list(e$sq[[k]]), "q")), qf)
-    o <- out(sprintf("blastn -query %s -subject %s -evalue 1e-10 -outfmt '6 qstart qend sstart send pident'", qf, rf))
-    if (!length(o)) return(NULL)
-    read_tsv(I(o), col_names = c("qstart", "qend", "sstart", "send", "pident"), show_col_types = FALSE) %>%
-      filter(sstart < send) %>% mutate(track = e$track[k])
-  })
-  L <- length(e$sq[[ref_k]]); lf <- nchar(pr$F_seq); lr <- nchar(pr$R_seq)
-  lev <- e %>% mutate(o = case_when(genome == "B73" & hit_at == "own locus" ~ 0, hit_at == "own locus" ~ 1,
-                                    hit_at == "alt haplotype" ~ 1.5, TRUE ~ 3)) %>% arrange(o, track) %>% pull(track) %>% unique()
-  sizes <- e %>% transmute(track, bp = to - from + 2L)
-  ggplot(blk, aes(y = factor(track, levels = rev(lev)))) +
-    annotate("rect", xmin = c(1, L - lr + 1), xmax = c(lf, L), ymin = -Inf, ymax = Inf, fill = "grey85") +
-    geom_segment(aes(x = sstart, xend = send, yend = factor(track, levels = rev(lev)), colour = pident), linewidth = 4.5) +
-    geom_text(data = sizes, aes(x = L * 1.02, label = sprintf("%s bp", format(bp, big.mark = ","))), hjust = 0, size = 3) +
-    id_scale("colour") +
-    scale_x_continuous(limits = c(1, L * 1.14), labels = scales::comma) +
-    labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq), x = "position in the B73 product (bp)", y = NULL,
-         subtitle = sprintf("%d products in %d genomes; grey = primer sites", nrow(e), n_distinct(e$genome))) +
-    theme_bw() + theme(panel.grid.minor = element_blank())
+MIN_HOM <- 40L
+annotation_map <- function(pr) {
+  pan <- ep %>% filter(name == pr$name) %>%
+    mutate(TO = to + 1L, lf = nchar(F_seq), lr = nchar(R_seq),
+           o = case_when(genome == "B73" & hit_at == "own locus" ~ 0, hit_at == "own locus" ~ 1, hit_at == "alt haplotype" ~ 2, TRUE ~ 3)) %>%
+    arrange(o, genome) %>% rowwise() %>%
+    mutate(chr_len = seq_len_of(genome, seq), win_start = max(1L, from - PADP), win_end = min(chr_len, TO + PADP),
+           F_s = ifelse(strand == "+", from, TO - lf + 1L), F_e = ifelse(strand == "+", from + lf - 1L, TO),
+           R_s = ifelse(strand == "+", TO - lr + 1L, from), R_e = ifelse(strand == "+", TO, from + lr - 1L)) %>% ungroup() %>%
+    mutate(id = sprintf("p%02d", row_number()),
+           tag = case_when(hit_at == "own locus" ~ "", hit_at == "alt haplotype" ~ "  alt", TRUE ~ sprintf("  %s", tolower(hit_at))),
+           panel = sprintf("%s %s:%s%s  [%s bp, %d mm]", taxon_prefix(genome), seq, format(from, big.mark = ","), tag,
+                           format(amp_bp, big.mark = ","), F_mm + R_mm),
+           panel = factor(panel, levels = rev(unique(panel))))
+  tl  <- function(g, i) if (pan$strand[i] == "+") as.integer(g - pan$win_start[i] + 1L) else as.integer(pan$win_end[i] - g + 1L)
+  seg <- function(a, b, i) sort(c(tl(a, i), tl(b, i)))
+  pseqs <- pan %>% transmute(seq_id = as.character(panel), length = win_end - win_start + 1L)
+  pamp <- bind_rows(lapply(seq_len(nrow(pan)), function(i) { a <- seg(pan$from[i], pan$TO[i], i)
+    tibble(seq_id = as.character(pan$panel[i]), start = a[1], end = a[2],
+           feat_type = case_when(pan$hit_at[i] %in% c("own locus", "alt haplotype") ~ "amplicon", pan$real_off[i] ~ "off_target", TRUE ~ "weak_off"),
+           name = sprintf("%s bp", format(pan$amp_bp[i], big.mark = ","))) }))
+  pprim <- bind_rows(lapply(seq_len(nrow(pan)), function(i) { f <- seg(pan$F_s[i], pan$F_e[i], i); r <- seg(pan$R_s[i], pan$R_e[i], i)
+    tibble(seq_id = as.character(pan$panel[i]), start = c(f[1], r[2]), end = c(f[2], r[1]),          # drawn 5'->3'
+           feat_type = c("forward_primer", "reverse_primer"), name = sprintf(c("F %dmm", "R %dmm"), c(pan$F_mm[i], pan$R_mm[i]))) }))
+  pex <- bind_rows(lapply(seq_len(nrow(pan)), function(i) {
+    ex <- read_gff(ACC$gff[ACC$accession == pan$genome[i]],
+                   sprintf("$3==\"exon\" && $1==\"%s\" && $5>=%d && $4<=%d", pan$seq[i], pan$win_start[i], pan$win_end[i]))
+    if (is.null(ex)) return(NULL)
+    bind_rows(lapply(seq_len(nrow(ex)), function(k) { x <- seg(max(ex$start[k], pan$win_start[i]), min(ex$end[k], pan$win_end[i]), i)
+      tibble(seq_id = as.character(pan$panel[i]), start = x[1], end = x[2], feat_type = "Exon", name = gene_of(tx_of(sub("_T\\d+$", "", ex$Parent[k])))) }))
+  }))
+  # homology: windows in panel orientation, so blastn query coordinates are already panel coordinates
+  win_fa <- file.path(WORK, sprintf("annotation_windows_%s.fa", pr$name))
+  writeXStringSet(DNAStringSet(setNames(map(seq_len(nrow(pan)), ~ grab(pan$genome[.x], pan$seq[.x], pan$win_start[.x], pan$win_end[.x], pan$strand[.x] == "-")), pan$id)), win_fa)
+  hom <- bl6(sprintf("blastn -task blastn -query %s -subject %s -evalue 1e-5 -word_size 9 -dust no -outfmt '6 qseqid sseqid pident qstart qend'",
+                     shQuote(win_fa), shQuote(win_fa)), c("q", "s", "pident", "qstart", "qend"))
+  hom <- if (is.null(hom)) NULL else filter(hom, q != s)
+  phom <- bind_rows(lapply(seq_len(nrow(pan)), function(i) {
+    h <- if (is.null(hom)) NULL else hom %>% filter(q == pan$id[i]); if (is.null(h) || !nrow(h)) return(NULL)
+    m <- merge_iv(h) %>% filter(end - start + 1L >= MIN_HOM); if (!nrow(m)) return(NULL)
+    m %>% transmute(seq_id = as.character(pan$panel[i]), start, end, feat_type = "homology", n_copies, pmax,
+                    name = sprintf("%d/%d copies, up to %.0f%% id", n_copies, nrow(pan) - 1L, pmax)) }))
+  phom_lab <- if (!nrow(phom)) tibble(seq_id = character(), x = integer(), label = character()) else
+    phom %>% group_by(seq_id) %>% summarise(x = max(end), nblk = n(), copies = max(n_copies), best = max(pmax), .groups = "drop") %>%
+    mutate(label = ifelse(nblk == 1L, sprintf("%d/%d copies, up to %.0f%% id", copies, nrow(pan) - 1L, best),
+                          sprintf("%d blocks, %d/%d copies, up to %.0f%% id", nblk, copies, nrow(pan) - 1L, best)))
+  if (!nrow(pex)) pex <- empty_feat
+  if (!nrow(phom)) phom <- empty_feat
+  gg <- gggenomes(seqs = pseqs, genes = pprim, feats = list(amplicons = pamp, exons = pex, homology = phom))
+  ymap <- pull_seqs(gg$data) %>% ungroup() %>% select(seq_id, y)
+  gg + geom_seq() + geom_bin_label(size = 2.6, expand_left = 0.55) +
+    geom_feat(data = feats(homology), aes(y = y - 0.36, yend = y - 0.36, color = feat_type), position = "identity", linewidth = 4, alpha = 0.8) +
+    geom_text(data = phom_lab %>% left_join(ymap, by = "seq_id"), aes(x = x + 20, y = y - 0.36, label = label),
+              hjust = 0, size = 1.9, color = "#4E7A93", inherit.aes = FALSE) +
+    geom_feat(data = feats(exons), aes(y = y - 0.15, yend = y - 0.15, color = feat_type), position = "identity", linewidth = 4, alpha = 0.8) +
+    geom_text(data = pex %>% distinct(seq_id, name, .keep_all = TRUE) %>% left_join(ymap, by = "seq_id"),
+              aes(x = (start + end) / 2, y = y - 0.25, label = name), size = 1.9, color = "grey30", inherit.aes = FALSE) +
+    geom_feat(data = feats(amplicons), aes(y = y + 0.17, yend = y + 0.17, color = feat_type), position = "identity", linewidth = 2.6) +
+    geom_text(data = pamp %>% left_join(ymap, by = "seq_id"), aes(x = (start + end) / 2, y = y + 0.28, label = name),
+              size = 2.3, color = "grey15", inherit.aes = FALSE) +
+    geom_gene(aes(fill = feat_type), color = NA, size = 6) +
+    geom_gene_label(aes(label = name), size = 1.9, nudge_y = 0.07) +
+    scale_color_manual(name = NULL,
+      values = c("homology" = "#7FA8C0", "Exon" = "#DAA520", "amplicon" = "#2E8B57", "off_target" = "#C0392B", "weak_off" = "grey60"),
+      labels = c("homology" = "Homology to the other products (blastn)", "Exon" = "Exon of overlapping gene",
+                 "amplicon" = "Expected product (own locus / alt haplotype)", "off_target" = "Off-target, 3' ends match",
+                 "weak_off" = "Off-target, 3' mismatch")) +
+    scale_fill_manual(name = NULL, values = c("forward_primer" = "#1F6FB4", "reverse_primer" = "#B4451F"),
+                      labels = c("forward_primer" = "forward primer", "reverse_primer" = "reverse primer")) +
+    coord_cartesian(ylim = c(0.45, nrow(pan) + 0.55)) +
+    labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq),
+         subtitle = sprintf("%d products in %d genomes; window = product ± %d bp, primer orientation", nrow(pan), n_distinct(pan$genome), PADP),
+         x = "position within window (bp)") +
+    theme(legend.position = "bottom", axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+          axis.title.y = element_blank(), panel.grid.minor = element_blank())
 }
 for (i in seq_len(nrow(final))) {
-  p <- amp_plot(final[i, ]); ggsave(file.path(RES, sprintf("amplicons_%s.png", final$name[i])), p, width = 11, height = 6, dpi = 150); print(p)
+  n_tr <- sum(ep$name == final$name[i])
+  p <- annotation_map(final[i, ])
+  ggsave(file.path(RES, sprintf("annotation_map_%s.png", final$name[i])), p, width = 12, height = 2 + 0.7 * n_tr, dpi = 150)
+  print(p)
 }
 ```
 
@@ -736,7 +802,7 @@ cat('::: {#bottom-line-content}\n',
     "\n", if (!is.null(fd4_alleles)) sprintf("- **ZmFd4 InDel194** (alignment over the 604-bp B73 block, §10): %s.\n",
                                              paste(sprintf("%s (%d loci)", fd4_alleles$a, fd4_alleles$n), collapse = ", ")) else "",
     "- **Recommended pairs** — each binds every locus once (both haplotypes), no degenerate bases unless stated, ",
-    "no off-locus product with matching 3′ ends in any genome (§8); amplicons aligned to B73 in §9b:\n\n", pairs_md,
+    "no off-locus product with matching 3′ ends in any genome (§8); annotation maps of the products in §9b:\n\n", pairs_md,
     "\n\n<small>* off-locus products with a mismatch in a primer's 3′-most 5 nt (not expected to amplify).</small>\n:::\n",
     '<script>document.getElementById("bottom-line-slot").appendChild(document.getElementById("bottom-line-content"));</script>\n', sep = "")
 ```
