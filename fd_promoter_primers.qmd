@@ -743,7 +743,7 @@ annotation_map <- function(pr) {
                  "weak_off" = "Off-target, 3' mismatch")) +
     scale_fill_manual(name = NULL, values = c("forward_primer" = "#1F6FB4", "reverse_primer" = "#B4451F"),
                       labels = c("forward_primer" = "forward primer", "reverse_primer" = "reverse primer")) +
-    guides(color = guide_legend(nrow = 2), fill = guide_legend(nrow = 2)) +
+    guides(color = guide_legend(nrow = 3), fill = guide_legend(nrow = 2)) +
     coord_cartesian(ylim = c(0.30, nrow(pan) + 0.62)) +
     labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq),
          subtitle = sprintf("%d products in %d genomes; window = product ± %d bp, primer orientation", nrow(pan), n_distinct(pan$genome), PADP),
