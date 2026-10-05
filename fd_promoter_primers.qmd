@@ -1,6 +1,5 @@
 ---
 title: "ZmFd4 / ZmFd9 promoter primers across PanAnd teosintes"
-subtitle: "Orthologs → loci → alignment → conserved primer sites → Primer3 (≤ 3 kb in every accession) → per-accession binding + whole-genome e-PCR"
 author: "thegemmalab@ncsu.edu"
 date: today
 params:
