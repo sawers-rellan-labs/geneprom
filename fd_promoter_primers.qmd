@@ -137,42 +137,72 @@ knitr::kable(cds_q %>% transmute(gene, b73_id, cds_bp = nchar(seq),
                                  start = substr(seq, 1, 3), end = substring(seq, nchar(seq) - 2)))
 ```
 
-## 3. Orthologs: one locus per gene per accession
+## 3. Orthologs: reciprocal best hits, one locus per haplotype
 
-`blastn` of both B73 CDSs against every genome. For each gene the ortholog is the best hit covering
-≥ 90 % of the CDS. **Paralog guard:** that locus must score higher with its own CDS than with the
-paralog's (Fd4 and Fd9 CDSs are ~85 % identical, so a teosinte Fd9 is also a decent Fd4 hit). The
-PanAnd gene model overlapping the hit gives the ortholog's ID and exon structure.
+1. `blastn` of both B73 CDSs against every genome; candidates are hits covering ≥ 90 % of the CDS.
+2. **Reciprocal best hit (RBH):** each candidate region is searched back against **all B73 genes**;
+   it is kept only if its best hit is the B73 gene it came from. This rejects any paralog — the other
+   ferredoxin (Fd4 and Fd9 CDSs are ~85 % identical) or more distant copies.
+3. **Primary haplotype** = the best RBH candidate on the B73-matching chromosome (chr2 for ZmFd4,
+   chr10 for ZmFd9); failing that, on any `chr*`. Wild accessions such as TIL01, Gigi, Momo and
+   PI615697 also carry their second haplotype as `alt-*` scaffolds: the best RBH candidate there is
+   kept as the **alt haplotype** (`<accession>_alt`), and primers must bind it too.
+4. The gene model overlapping each hit gives the ortholog ID and exon structure.
 
 ```{r orthologs}
 bl_cols <- c("qseqid","sseqid","pident","length","qstart","qend","sstart","send","evalue","bitscore","qlen")
-hits <- map_dfr(seq_len(nrow(ACC)), function(i) {
-  o <- out(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 20 -num_threads %d -outfmt '6 %s'",
-                   shQuote(qfa), shQuote(ACC$db[i]), THREADS, paste(bl_cols, collapse = " ")))
-  if (!length(o)) return(NULL)
-  read_tsv(I(o), col_names = bl_cols, show_col_types = FALSE) %>% mutate(accession = ACC$accession[i])
-}) %>% mutate(strand = ifelse(send >= sstart, "+", "-"), lo = pmin(sstart, send), hi = pmax(sstart, send),
-              qcov = length / qlen)
+blast_tbl <- function(cmd) { o <- out(cmd); if (!length(o)) return(NULL)
+  read_tsv(I(o), col_names = bl_cols, show_col_types = FALSE) }
+hits <- map_dfr(seq_len(nrow(ACC)), function(i)
+  blast_tbl(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 20 -num_threads %d -outfmt '6 %s'",
+                    shQuote(qfa), shQuote(ACC$db[i]), THREADS, paste(bl_cols, collapse = " "))) %>%
+    mutate(genome = ACC$accession[i])) %>%
+  mutate(strand = ifelse(send >= sstart, "+", "-"), lo = pmin(sstart, send), hi = pmax(sstart, send), qcov = length / qlen)
 
-orth <- map_dfr(seq_len(nrow(ACC)), function(i) map_dfr(GENES$gene, function(g) {
-  a <- ACC$accession[i]
-  cand <- hits %>% filter(accession == a, qseqid == g, qcov >= 0.9) %>% arrange(desc(bitscore))
-  if (!nrow(cand)) return(tibble(accession = a, gene = g, status = "no hit"))
-  b <- cand[1, ]
-  para <- hits %>% filter(accession == a, qseqid != g, sseqid == b$sseqid, hi >= b$lo, lo <= b$hi)
-  para_bits <- if (nrow(para)) max(para$bitscore) else 0
-  atg <- if (b$strand == "+") b$sstart - (b$qstart - 1L) else b$sstart + (b$qstart - 1L)
-  cend <- if (b$strand == "+") b$send + (b$qlen - b$qend) else b$send - (b$qlen - b$qend)
-  tibble(accession = a, gene = g, chr = b$sseqid, strand = b$strand, atg = atg, cds_end = cend,
-         pident = b$pident, bits = b$bitscore, paralog_bits = para_bits,
-         next_bits = if (nrow(cand) > 1) cand$bitscore[2] else NA_real_,
-         status = ifelse(b$bitscore > para_bits, "ok", "PARALOG?"))
-}))
+# B73 gene set (genomic span of every gene) as the RBH target
+b73_db <- file.path(WORK, "blastdb", "b73_genes")
+if (!has_db(b73_db)) {
+  gg <- read_gff(b73$gff, '$3=="gene"')
+  reg <- file.path(WORK, "b73_genes.regions"); ids <- file.path(WORK, "b73_genes.ids"); gfa <- file.path(WORK, "b73_genes.fa")
+  writeLines(sprintf("%s:%d-%d", gg$seqid, gg$start, gg$end), reg); writeLines(gg$ID, ids)
+  sh(sprintf("samtools faidx --fai-idx %s %s -r %s | awk 'NR==FNR{id[NR]=$1; next} /^>/{n++; print \">\" id[n]; next} {print}' %s - > %s",
+             shQuote(b73$fai), shQuote(b73$fa), shQuote(reg), shQuote(ids), shQuote(gfa)))
+  sh(sprintf("makeblastdb -dbtype nucl -in %s -out %s", shQuote(gfa), shQuote(b73_db)))
+}
+ocand <- hits %>% filter(qcov >= 0.9) %>% mutate(cid = sprintf("c%d", row_number()))
+cfa <- file.path(WORK, "rbh_candidates.fa")
+writeXStringSet(DNAStringSet(setNames(map(seq_len(nrow(ocand)), ~ grab(ocand$genome[.x], ocand$sseqid[.x], ocand$lo[.x], ocand$hi[.x])), ocand$cid)), cfa)
+back <- blast_tbl(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 5 -num_threads %d -outfmt '6 %s'",
+                          shQuote(cfa), shQuote(b73_db), THREADS, paste(bl_cols, collapse = " "))) %>%
+  group_by(qseqid) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup() %>%
+  transmute(cid = qseqid, back_best = sseqid)
+ocand <- ocand %>% left_join(back, by = "cid") %>% left_join(GENES %>% rename(qseqid = gene), by = "qseqid") %>%
+  mutate(rbh = !is.na(back_best) & back_best == b73_id, alt = grepl("^alt", sseqid))
+b73_chr <- ocand %>% filter(genome == "B73", rbh) %>% group_by(qseqid) %>% slice_max(bitscore, n = 1) %>% select(qseqid, b73_chr = sseqid)
+ocand <- ocand %>% left_join(b73_chr, by = "qseqid")
 
-# PanAnd / Helixer gene model overlapping each hit
+pick_locus <- function(d, hap) {
+  b <- if (hap == "primary") {
+    d1 <- d %>% filter(rbh, !alt, sseqid == b73_chr)
+    if (!nrow(d1)) d1 <- d %>% filter(rbh, !alt, grepl("^chr", sseqid))
+    d1
+  } else d %>% filter(rbh, alt)
+  b <- b %>% arrange(desc(bitscore)) %>% slice(1)
+  if (!nrow(b)) return(NULL)
+  tibble(genome = b$genome, gene = b$qseqid, hap = hap, accession = ifelse(hap == "alt", paste0(b$genome, "_alt"), b$genome),
+         chr = b$sseqid, strand = b$strand, pident = b$pident, bits = b$bitscore,
+         atg = if (b$strand == "+") b$sstart - (b$qstart - 1L) else b$sstart + (b$qstart - 1L),
+         cds_end = if (b$strand == "+") b$send + (b$qlen - b$qend) else b$send - (b$qlen - b$qend))
+}
+orth <- ocand %>% group_split(genome, qseqid) %>% map_dfr(~ bind_rows(pick_locus(.x, "primary"), pick_locus(.x, "alt")))
+rbh_tbl <- ocand %>% group_by(genome, gene = qseqid) %>%
+  summarise(candidates = n(), rbh_pass = sum(rbh), rejected_as = paste(unique(back_best[!rbh]), collapse = ","), .groups = "drop")
+missing <- ACC %>% select(genome = accession) %>% crossing(gene = GENES$gene) %>% anti_join(orth %>% filter(hap == "primary"), by = c("genome", "gene"))
+if (nrow(missing)) stop("no primary ortholog for: ", paste(missing$genome, missing$gene, collapse = "; "))
+
+# gene model overlapping each hit
 models <- map_dfr(seq_len(nrow(orth)), function(k) {
-  o <- orth[k, ]; if (o$status == "no hit") return(NULL)
-  g <- ACC$gff[ACC$accession == o$accession]
+  o <- orth[k, ]; g <- ACC$gff[ACC$accession == o$genome]
   lo <- min(o$atg, o$cds_end); hi <- max(o$atg, o$cds_end)
   gm <- read_gff(g, sprintf("$1==\"%s\" && $5>=%d && $4<=%d", o$chr, lo - 20000L, hi + 20000L))
   if (is.null(gm)) return(NULL)
@@ -183,18 +213,18 @@ models <- map_dfr(seq_len(nrow(orth)), function(k) {
   gm %>% filter(Parent == tx$ID, type %in% c("exon", "CDS", "five_prime_UTR", "three_prime_UTR")) %>%
     mutate(accession = o$accession, gene = o$gene, model_id = gmod$ID)
 })
-orth <- orth %>% left_join(models %>% distinct(accession, gene, model_id), by = c("accession", "gene"))
+orth <- orth %>% left_join(models %>% distinct(accession, gene, model_id), by = c("accession", "gene")) %>%
+  arrange(gene, genome, desc(hap == "primary"))
 write_tsv(orth, file.path(RES, "orthologs.tsv"))
-knitr::kable(orth %>% transmute(gene, accession, model_id, locus = sprintf("%s:%s (%s)", chr, format(atg, big.mark = ","), strand),
-                                pident, bits, paralog_bits, status),
-             caption = "ATG position of each ortholog (from the CDS hit). paralog_bits = best score of the other gene's CDS at the same locus.")
-stopifnot(all(orth$status == "ok"))
+knitr::kable(orth %>% transmute(gene, accession, hap, model_id, locus = sprintf("%s:%s (%s)", chr, format(atg, big.mark = ","), strand), pident, bits),
+             caption = "Ortholog loci (ATG position from the CDS hit). Every row passed the reciprocal best hit test.")
+knitr::kable(rbh_tbl, caption = "Candidates per genome and gene; rejected_as = the B73 gene a rejected candidate maps back to.")
 ```
 
 ## 4. Loci in gene orientation
 
 Each locus runs from `r UP` bp upstream of the ATG to `r DOWN` bp past the CDS end, reverse
-complemented for minus-strand genes, so position `r UP + 1` is the A of the ATG in every accession.
+complemented for minus-strand genes, so position `r UP + 1` is the A of the ATG in every locus.
 Gene-model features are projected onto the same coordinates.
 
 ```{r loci}
@@ -205,7 +235,7 @@ to_locus <- function(g, o) if (o$strand == "+") g - o$from + 1L else o$to - g + 
 
 loci <- map(set_names(GENES$gene), function(g) {
   oo <- orth %>% filter(gene == g)
-  s <- DNAStringSet(map(seq_len(nrow(oo)), function(k) grab(oo$accession[k], oo$chr[k], oo$from[k], oo$to[k], oo$strand[k] == "-")))
+  s <- DNAStringSet(map(seq_len(nrow(oo)), function(k) grab(oo$genome[k], oo$chr[k], oo$from[k], oo$to[k], oo$strand[k] == "-")))
   names(s) <- oo$accession
   writeXStringSet(s, file.path(WORK, "loci", paste0(g, ".fa")))
   s
@@ -214,7 +244,7 @@ feats <- models %>% left_join(orth %>% select(accession, gene, strand, from, to)
   rowwise() %>% mutate(s = to_locus(start, list(strand = strand.y, from = from, to = to)),
                        e = to_locus(end,   list(strand = strand.y, from = from, to = to))) %>% ungroup() %>%
   transmute(gene, accession, type, start = pmin(s, e), end = pmax(s, e)) %>% arrange(gene, accession, start)
-# first CDS exon of each accession (transcript order = locus order after orientation)
+# first CDS exon of each locus (transcript order = locus order after orientation)
 cds1 <- feats %>% filter(type == "CDS") %>% group_by(gene, accession) %>% slice_min(start, n = 1) %>% ungroup()
 knitr::kable(feats %>% filter(type == "exon") %>% group_by(gene, accession) %>%
                summarise(exons = paste(sprintf("%d-%d", start - UP - 1L, end - UP - 1L), collapse = ", "), .groups = "drop"),
@@ -233,7 +263,8 @@ Conservation is evaluated on **B73 coordinates** of the alignment:
 ```{r align}
 aln <- map(set_names(GENES$gene), function(g) {
   af <- file.path(WORK, "aln", paste0(g, ".aln.fa"))
-  if (!file.exists(af)) sh(sprintf("mafft --genafpair --maxiterate 1000 --thread %d --quiet %s > %s",
+  lf <- file.path(WORK, "loci", paste0(g, ".fa"))
+  if (!file.exists(af) || file.mtime(af) < file.mtime(lf)) sh(sprintf("mafft --genafpair --maxiterate 1000 --thread %d --quiet %s > %s",
                                    THREADS, shQuote(file.path(WORK, "loci", paste0(g, ".fa"))), shQuote(af)))
   m <- as.matrix(readDNAMultipleAlignment(af))
   m[c("B73", setdiff(rownames(m), "B73")), , drop = FALSE]
@@ -363,49 +394,78 @@ knitr::kable(bind_check %>% count(gene, all_bind), caption = "Primer3 pairs whos
 
 ## 8. Whole-genome e-PCR specificity
 
-`-n 3 -g 1`: up to 3 mismatches and 1 gap per primer (as in `primermu`). A good pair gives
-**one** product per genome, at its own locus, and nothing at the paralog.
+`-n 3 -g 1`: up to 3 mismatches and 1 gap per primer (as in `primermu`). Each product is placed:
+**own locus** (primary haplotype), **alt haplotype** (the same gene on an `alt-*` scaffold —
+expected, a teosinte plant carries both), **PARALOG** (the other ferredoxin) or **elsewhere**. As in
+`primermu`, each primer site of an unexpected product is re-read from the genome: a product counts
+as a real off-target only if **neither primer has a mismatch in its 3′-most 5 nt** (a 3′ mismatch
+blocks extension).
 
 ```{r epcr}
 jia <- read_tsv("config/jia2025_primers.tsv", show_col_types = FALSE)
 jia_pairs <- tibble(name = c("Jia-G1 (G-F1/G-R1)", "Jia-G2 (G-F2/G-R2)", "Jia-Fd9-JD"), gene = c("ZmFd4", "ZmFd4", "ZmFd9"),
                     F_seq = jia$seq[match(c("ZmFd4-G-F1", "ZmFd4-G-F2", "ZmFd9-JD-F"), jia$name)],
                     R_seq = jia$seq[match(c("ZmFd4-G-R1", "ZmFd4-G-R2", "ZmFd9-JD-R"), jia$name)])
-sts_tbl <- bind_rows(cand %>% select(name, gene, F_seq, R_seq), jia_pairs)
+sts_tbl <- bind_rows(cand %>% select(name, gene, F_seq, R_seq), jia_pairs) %>% mutate(sts = str_replace_all(name, "[ ()/]", "_"))
 sts <- file.path(WORK, "epcr", "pairs.sts")
-writeLines(sprintf("%s\t%s\t%s\t100-5000", str_replace_all(sts_tbl$name, "[ ()/]", "_"), sts_tbl$F_seq, sts_tbl$R_seq), sts)
+writeLines(sprintf("%s\t%s\t%s\t100-5000", sts_tbl$sts, sts_tbl$F_seq, sts_tbl$R_seq), sts)
 ep <- map_dfr(seq_len(nrow(ACC)), function(i) {
   o <- file.path(WORK, "epcr", paste0(ACC$accession[i], ".txt"))
-  if (!file.exists(o)) sh(sprintf("e-PCR -n 3 -g 1 -m 50 -w 7 -t 3 -a f -o %s %s %s", shQuote(o), shQuote(sts), shQuote(ACC$fa[i])))
+  if (!file.exists(o) || file.mtime(o) < file.mtime(sts))
+    sh(sprintf("e-PCR -n 3 -g 1 -m 50 -w 7 -t 3 -a f -o %s %s %s", shQuote(o), shQuote(sts), shQuote(ACC$fa[i])))
   if (!file.info(o)$size) return(NULL)
-  read_tsv(o, comment = "#", show_col_types = FALSE, col_names = c("seq","sts","strand","from","to","size","mism","gaps","x")) %>%
-    mutate(accession = ACC$accession[i])
-}) %>% left_join(sts_tbl %>% mutate(sts = str_replace_all(name, "[ ()/]", "_")) %>% select(sts, name, pair_gene = gene), by = "sts")
-# where is each product: own locus, paralog locus, elsewhere
+  read_tsv(o, comment = "#", show_col_types = FALSE, col_types = "ccciiciic",
+           col_names = c("seq","sts","strand","from","to","size","mism","gaps","x")) %>% mutate(genome = ACC$accession[i])
+}) %>% left_join(sts_tbl %>% select(sts, name, pair_gene = gene, F_seq, R_seq), by = "sts")
+
+# place each product
 ep <- ep %>% rowwise() %>% mutate(hit_at = {
-  o <- orth %>% filter(accession == .env$accession, chr == seq, from <= .env$to, to >= .env$from)
-  if (!nrow(o)) "elsewhere" else if (o$gene[1] == pair_gene) "own locus" else "PARALOG"
+  o <- orth %>% filter(genome == .env$genome, chr == seq, from <= .env$to, to >= .env$from)
+  if (!nrow(o)) "elsewhere" else if (o$gene[1] != pair_gene) "PARALOG" else if (o$hap[1] == "alt") "alt haplotype" else "own locus"
 }) %>% ungroup()
-spec <- ep %>% count(name, accession, hit_at) %>% pivot_wider(names_from = hit_at, values_from = n, values_fill = 0)
-write_tsv(ep, file.path(RES, "epcr_hits.tsv"))
-knitr::kable(spec, caption = "e-PCR products per pair and genome.")
+
+# 3'-end mismatches of each primer site (IUPAC-aware), as in primermu
+iupac_set <- list(A="A",C="C",G="G",T="T",R="AG",Y="CT",S="CG",W="AT",K="GT",M="AC",B="CGT",D="AGT",H="ACT",V="ACG",N="ACGT")
+mm3 <- function(site, p) { a <- strsplit(site, "")[[1]]; b <- strsplit(p, "")[[1]]; n <- length(b)
+  bad <- vapply(seq_len(n), function(k) !grepl(a[k], iupac_set[[b[k]]], fixed = TRUE), logical(1))
+  c(total = sum(bad), end3 = sum(bad[(n - 4):n])) }
+ep <- ep %>% rowwise() %>% mutate(m = list({
+  lf <- nchar(F_seq); lr <- nchar(R_seq); TO <- to + 1L
+  if (strand == "+") { fs <- c(from, from + lf - 1L); rs <- c(TO - lr + 1L, TO); frc <- FALSE; rrc <- TRUE }
+  else               { fs <- c(TO - lf + 1L, TO); rs <- c(from, from + lr - 1L); frc <- TRUE;  rrc <- FALSE }
+  cf <- mm3(as.character(grab(genome, seq, fs[1], fs[2], frc)), F_seq)
+  cr <- mm3(as.character(grab(genome, seq, rs[1], rs[2], rrc)), R_seq)
+  tibble(F_mm = cf[["total"]], F_3p = cf[["end3"]], R_mm = cr[["total"]], R_3p = cr[["end3"]])
+})) %>% ungroup() %>% unnest(m) %>%
+  mutate(amp_bp = to - from + 2L, real_off = hit_at %in% c("elsewhere", "PARALOG") & F_3p == 0 & R_3p == 0)
+write_tsv(ep %>% select(name, genome, seq, strand, from, to, amp_bp, hit_at, F_mm, F_3p, R_mm, R_3p, real_off),
+          file.path(RES, "epcr_hits.tsv"))
+
+spec <- ep %>% group_by(name, genome) %>%
+  summarise(own = sum(hit_at == "own locus"), alt = sum(hit_at == "alt haplotype"),
+            off_3p_mismatch = sum(hit_at %in% c("elsewhere", "PARALOG") & !real_off), off_real = sum(real_off), .groups = "drop") %>%
+  complete(name = sts_tbl$name, genome = ACC$accession, fill = list(own = 0L, alt = 0L, off_3p_mismatch = 0L, off_real = 0L))
+knitr::kable(spec %>% mutate(cell = sprintf("%d%s%s", own, ifelse(alt > 0, sprintf("+%da", alt), ""),
+                                            ifelse(off_real > 0, sprintf(" OFF%d", off_real), ""))) %>%
+               select(name, genome, cell) %>% pivot_wider(names_from = genome, values_from = cell),
+             caption = "Products per pair and genome: own-locus count, +Na = alt haplotype, OFFn = real off-targets (3′ ends match).")
 ```
 
 ## 9. Recommended pairs
 
 ```{r final}
 specific <- spec %>% group_by(name) %>%
-  summarise(single = all(`own locus` == 1) & all(if ("PARALOG" %in% names(spec)) PARALOG == 0 else TRUE) &
-                     all(if ("elsewhere" %in% names(spec)) elsewhere == 0 else TRUE), .groups = "drop")
-final <- cand %>% left_join(specific, by = "name") %>% filter(single %in% TRUE)
+  summarise(specific = all(own == 1 & off_real == 0), weak_off = sum(off_3p_mismatch), .groups = "drop")
+final <- cand %>% left_join(specific, by = "name") %>% filter(specific %in% TRUE)
 write_tsv(final %>% select(name, gene, pass, F_seq, R_seq, F_len, R_len, F_tm, R_tm, F_gc, R_gc,
-                           F_from_atg, R_from_atg, prod_b73, min_prod, max_prod, deg, penalty),
+                           F_from_atg, R_from_atg, prod_b73, min_prod, max_prod, deg, penalty, weak_off),
           file.path(RES, "primers.tsv"))
 knitr::kable(final %>% transmute(name, forward = F_seq, reverse = R_seq, `F Tm` = F_tm, `R Tm` = R_tm,
                                  `F 5′ vs ATG` = F_from_atg, `R 3′ end vs ATG` = R_from_atg,
-                                 `B73 bp` = prod_b73, `range across accessions` = sprintf("%d–%d", min_prod, max_prod),
-                                 degenerate = deg, penalty),
-             caption = "Pairs that bind every accession once and give a single whole-genome e-PCR product in every genome.")
+                                 `B73 bp` = prod_b73, `range across loci` = sprintf("%d–%d", min_prod, max_prod),
+                                 degenerate = deg, `off-targets with 3′ mismatch` = weak_off, penalty),
+             caption = "Pairs that bind every locus (both haplotypes) once and give no real off-target product in any genome.")
+if (!nrow(final)) message("No pair passed: see the e-PCR table above.")
 ```
 
 ## 10. Jia *et al.* 2025 primers as a benchmark
@@ -440,7 +500,8 @@ draw_gene <- function(g) {
   ft <- feats %>% filter(gene == g, type %in% c("exon", "CDS")) %>%
     transmute(seq_id = accession, start, end, feat_type = type)
   fp <- final %>% filter(gene == g) %>% slice_head(n = 1)
-  prim <- map_dfr(names(ls), function(a) {
+  prim <- tibble(seq_id = character(), start = integer(), end = integer(), feat_type = character())
+  if (nrow(fp)) prim <- map_dfr(names(ls), function(a) {
     s <- ls[[a]]
     if (!nrow(fp)) return(NULL)
     f <- matchPattern(DNAString(fp$F_seq), s, fixed = "subject"); r <- matchPattern(reverseComplement(DNAString(fp$R_seq)), s, fixed = "subject")
