@@ -56,4 +56,18 @@ fetch_prot() {  # $1 accession  $2 MaizeGDB assembly/file
 }
 fetch_prot B73 Zm-B73-REFERENCE-NAM-5.0/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.protein.fa.gz
 fetch_prot TIL18 Zx-TIL18-REFERENCE-PanAnd-1.0/Zx-TIL18-REFERENCE-PanAnd-1.0_Zx00002aa.1.protein.fa.gz
+
+# TE annotation (EDTA) of the slices, shifted like the gene GFF, sorted + bgzipped + tabix-indexed
+fetch_te() {  # $1 accession  $2 MaizeGDB assembly/file
+  local gz=work/proteomes/$(basename "$2")
+  [ -s "$gz" ] || curl -sfL --retry 3 -o "$gz" "https://download.maizegdb.org/$2"
+  slices | awk -v a="$1" '$1==a' | while IFS=$'\t' read -r acc src chr s e; do
+    from=$((s - FLANK)); to=$((e + FLANK)); off=$((from - 1))
+    gzip -dc "$gz" | awk -F'\t' -v OFS='\t' -v c="$chr" -v a="$from" -v b="$to" -v o="$off" \
+      '$1==c && $4>=a && $5<=b {$4-=o; $5-=o; print}'
+  done | sort -k1,1 -k4,4n | bgzip -c > "$OUT/$1.TE.gff3.gz"
+  tabix -f -p gff "$OUT/$1.TE.gff3.gz"
+}
+fetch_te B73 Zm-B73-REFERENCE-NAM-5.0/Zm-B73-REFERENCE-NAM-5.0.TE.gff3.gz
+fetch_te TIL18 Zx-TIL18-REFERENCE-PanAnd-1.0/Zx-TIL18-REFERENCE-PanAnd-1.0_EDTA.gff3.gz
 ls -la "$OUT"

@@ -37,6 +37,7 @@ exist and stops with a list of anything missing. For every row of `config/access
 | `<assembly>.n*` nucleotide BLAST DB (`-parse_seqids`) | ortholog search |
 | `<assembly>_<annotation>.gff3` (RIL003: `_helixer.gff.gz`) | gene models |
 | `<assembly>_<annotation>.protein.fa` + `.fai` + `.p*` protein BLAST DB (`-parse_seqids`) | protein retrieval / blastp |
+| `<assembly>_EDTA.sorted.gff3.gz` + `.tbi` (B73: `Zm-B73-REFERENCE-NAM-5.0.TE.sorted.gff3.gz`; none for RIL003) | TE track of the annotation maps |
 
 Accessions: B73 v5 (coordinate reference) + TIL01, TIL11 (*parviglumis*), TIL18, TIL25 (*mexicana*),
 RIMHU001 (*huehuetenangensis*), Gigi, Momo (*diploperennis*), PI615697 (*nicaraguensis*), RIL003
@@ -46,7 +47,9 @@ RIMHU001 (*huehuetenangensis*), Gigi, Momo (*diploperennis*), PI615697 (*nicarag
 decompressed from `.fa.gz` and its nucleotide BLAST DB built (job 1106909). Protein FASTAs
 downloaded from `download.maizegdb.org/<assembly>/` (RIL003: translated from the Helixer GFF with
 `gffread -y`), indexed with `samtools faidx` and `makeblastdb -dbtype prot -parse_seqids`
-(job 1106876, xfer partition). The prep scripts are not part of this repo.
+(job 1106876, xfer partition). TE annotations (MaizeGDB EDTA GFFs) downloaded next to each genome and
+stored coordinate-sorted, bgzipped and tabix-indexed (job 1108482). The prep scripts are not part of
+this repo.
 
 Laptop stub inputs (B73 + TIL18, ±200 kb around each gene) are in `tests/fixtures/`, made by
 `scripts/make_stub_fixtures.sh`.

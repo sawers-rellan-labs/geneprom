@@ -6,10 +6,10 @@
   "description": "TIL18 stub proteins",
   "number-of-letters": 10235,
   "number-of-sequences": 27,
-  "last-updated": "2026-10-05T11:31:00",
+  "last-updated": "2026-10-05T13:53:00",
   "number-of-volumes": 1,
-  "bytes-total": 210167,
-  "bytes-to-cache": 10591,
+  "bytes-total": 210159,
+  "bytes-to-cache": 10583,
   "files": [
     "TIL18.protein.pdb",
     "TIL18.protein.phr",

@@ -68,6 +68,10 @@ THREADS <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
 GENES <- tibble(gene = c("ZmFd4", "ZmFd9"), b73_id = c("Zm00001eb083950", "Zm00001eb421930"))
 UP <- 6000L; DOWN <- 1000L                 # locus = ATG - UP .. CDS end + DOWN, in gene orientation
 PRODUCT_MAX <- 3000L                       # hard cap, every accession
+# ZmFd4 InDel194 as documented by Jia et al. 2025: a 604-bp indel ending 194 bp upstream of the ATG; B73 carries
+# the full sequence (Hap1). Positions relative to the ATG (A = 0) and in B73 locus coordinates (ATG at UP + 1).
+INDEL194_REL <- c(-798L, -195L)
+INDEL194_LOC <- UP + 1L + INDEL194_REL
 P3_RANGE <- c(1500L, PRODUCT_MAX)          # Primer3 range on the B73 template; the cap is re-checked per accession
 N_PAIRS <- 3L; MIN_SEP <- 50L
 # one % identity colour scale for every figure and both genes: blue, darker = more similar; <= 85 % shown as 85
@@ -102,11 +106,12 @@ ACC <- ACC %>% mutate(
   gff  = file.path(REF, gff),
   db   = sub("\\.fa$", "", fa),
   prot = file.path(REF, protein),
-  pdb  = sub("\\.fa$", "", prot))
+  pdb  = sub("\\.fa$", "", prot),
+  te   = ifelse(is.na(te) | te == "", NA_character_, file.path(REF, te)))   # EDTA TE GFF, sorted + bgzip + tabix; optional
 has_db <- function(p, k = "n") any(file.exists(paste0(p, sprintf(c(".%ssq", ".%sal", ".00.%ssq"), k))))
 no_db  <- ACC$db[!map_lgl(ACC$db, has_db)]
 no_pdb <- ACC$pdb[!map_lgl(ACC$pdb, has_db, k = "p")]
-files  <- c(ACC$fa, ACC$gff, ACC$prot, paste0(ACC$prot, ".fai"))
+files  <- c(ACC$fa, ACC$gff, ACC$prot, paste0(ACC$prot, ".fai"), na.omit(ACC$te), paste0(na.omit(ACC$te), ".tbi"))
 missing_in <- c(files[!file.exists(files)], if (length(no_db)) paste(no_db, "(nucleotide BLAST DB)"),
                 if (length(no_pdb)) paste(no_pdb, "(protein BLAST DB)"))
 if (length(missing_in)) stop("missing inputs (prepare them first, see README):\n", paste(missing_in, collapse = "\n"))
@@ -133,6 +138,15 @@ canonical <- function(gm) gm %>% filter(type == "mRNA") %>%
   arrange(Parent, desc(grepl("canonical_transcript=1", attr)), ID) %>% distinct(Parent, .keep_all = TRUE) %>%
   transmute(gene_id = Parent, tx = ID, pid = pid_of(ID))
 gff_cols <- c("seqid","src","type","start","end","score","strand","phase","attr")
+read_te <- function(acc, chr, s, e) {                      # EDTA TE features overlapping chr:s-e (tabix)
+  f <- ACC$te[ACC$accession == acc]
+  if (is.na(f)) return(NULL)
+  txt <- out(sprintf("tabix %s %s:%d-%d", shQuote(f), chr, max(1L, s), e))
+  if (!length(txt)) return(NULL)
+  read_tsv(I(txt), col_names = gff_cols, col_types = "ccciicccc") %>%
+    mutate(Name = str_match(attr, "Name=([^;]+)")[, 2], Classification = str_match(attr, "Classification=([^;]+)")[, 2]) %>%
+    filter(!is.na(Classification), type != "repeat_region")
+}
 read_gff <- function(gff, filter_awk) {
   cat_cmd <- if (grepl("\\.gz$", gff)) "gzip -dc" else "cat"
   txt <- out(sprintf("%s %s | awk -F'\\t' '%s'", cat_cmd, shQuote(gff), filter_awk))
@@ -339,6 +353,11 @@ orth <- orth %>% mutate(
   from = ifelse(strand == "+", atg - UP, cds_end - DOWN),
   to   = ifelse(strand == "+", cds_end + DOWN, atg + UP))
 to_locus <- function(g, o) if (o$strand == "+") g - o$from + 1L else o$to - g + 1L
+loc_to_g <- function(p, o) if (o$strand == "+") o$from - 1L + p else o$to + 1L - p
+b4 <- orth %>% filter(genome == "B73", gene == "ZmFd4", hap == "primary")
+INDEL194_G <- list(chr = b4$chr, range = sort(c(loc_to_g(INDEL194_LOC[1], b4), loc_to_g(INDEL194_LOC[2], b4))))
+cat(sprintf("InDel194 (Jia 2025) in B73 v5: %s:%s-%s (%d bp)\n", INDEL194_G$chr, format(INDEL194_G$range[1], big.mark = ","),
+            format(INDEL194_G$range[2], big.mark = ","), diff(INDEL194_G$range) + 1L))
 
 # A locus can run past the end of its contig (e.g. a short alt scaffold): extract the part that exists and pad the
 # missing end with N, so the A of the ATG stays at position UP + 1 in every locus. N columns are never primer sites.
@@ -617,6 +636,7 @@ leftmost (primer orientation, not genome orientation). Tracks, bottom to top:
 - **homology** to the other products (computed: each window is blastn'd against the others,
   `-word_size 9`, no dust; overlapping HSPs merged, blocks ≥ 40 bp drawn) — a gap shows sequence
   the others lack, e.g. InDel194 present only in B73;
+- **transposable elements** (MaizeGDB EDTA annotation, labelled by class; none for RIL003);
 - **exons** of any gene overlapping the window (gene model ID);
 - the **primer sites** (arrows, labelled with mismatches) and the **product** (green = expected,
   red = off-target with matching 3′ ends, grey = off-target with a 3′ mismatch).
@@ -680,30 +700,51 @@ annotation_map <- function(pr) {
     phom %>% group_by(seq_id) %>% summarise(x = max(end), nblk = n(), copies = max(n_copies), best = max(pmax), .groups = "drop") %>%
     mutate(label = ifelse(nblk == 1L, sprintf("%d/%d copies, up to %.0f%% id", copies, nrow(pan) - 1L, best),
                           sprintf("%d blocks, %d/%d copies, up to %.0f%% id", nblk, copies, nrow(pan) - 1L, best)))
+  pte <- bind_rows(lapply(seq_len(nrow(pan)), function(i) {
+    te <- read_te(pan$genome[i], pan$seq[i], pan$win_start[i], pan$win_end[i]); if (is.null(te) || !nrow(te)) return(NULL)
+    bind_rows(lapply(seq_len(nrow(te)), function(k) { x <- seg(max(te$start[k], pan$win_start[i]), min(te$end[k], pan$win_end[i]), i)
+      tibble(seq_id = as.character(pan$panel[i]), start = x[1], end = x[2], feat_type = "TE", name = te$Classification[k]) }))
+  }))
+  pind <- bind_rows(lapply(seq_len(nrow(pan)), function(i) {          # documented InDel194, B73 panel(s) only
+    r <- INDEL194_G$range
+    if (pan$genome[i] != "B73" || pan$seq[i] != INDEL194_G$chr || r[2] < pan$win_start[i] || r[1] > pan$win_end[i]) return(NULL)
+    x <- seg(max(r[1], pan$win_start[i]), min(r[2], pan$win_end[i]), i)
+    tibble(seq_id = as.character(pan$panel[i]), start = x[1], end = x[2], feat_type = "indel", name = "InDel194 (Jia 2025, 604 bp)")
+  }))
   if (!nrow(pex)) pex <- empty_feat
   if (!nrow(phom)) phom <- empty_feat
-  gg <- gggenomes(seqs = pseqs, genes = pprim, feats = list(amplicons = pamp, exons = pex, homology = phom))
+  if (!nrow(pind)) pind <- empty_feat
+  if (!nrow(pte)) pte <- empty_feat
+  gg <- gggenomes(seqs = pseqs, genes = pprim, feats = list(amplicons = pamp, exons = pex, homology = phom, indel = pind, tes = pte))
   ymap <- pull_seqs(gg$data) %>% ungroup() %>% select(seq_id, y)
   gg + geom_seq() + geom_bin_label(size = 2.6, expand_left = 0.55) +
-    geom_feat(data = feats(homology), aes(y = y - 0.36, yend = y - 0.36, color = feat_type), position = "identity", linewidth = 4, alpha = 0.8) +
-    geom_text(data = phom_lab %>% left_join(ymap, by = "seq_id"), aes(x = x + 20, y = y - 0.36, label = label),
+    geom_feat(data = feats(homology), aes(y = y - 0.52, yend = y - 0.52, color = feat_type), position = "identity", linewidth = 4, alpha = 0.8) +
+    geom_text(data = phom_lab %>% left_join(ymap, by = "seq_id"), aes(x = x + 20, y = y - 0.52, label = label),
               hjust = 0, size = 1.9, color = "#4E7A93", inherit.aes = FALSE) +
+    geom_feat(data = feats(tes), aes(y = y - 0.36, yend = y - 0.36, color = feat_type), position = "identity", linewidth = 4, alpha = 0.85) +
+    geom_text(data = pte %>% left_join(ymap, by = "seq_id"), aes(x = (start + end) / 2, y = y - 0.43, label = name),
+              size = 1.7, color = "#1F5468", check_overlap = TRUE, inherit.aes = FALSE) +
     geom_feat(data = feats(exons), aes(y = y - 0.15, yend = y - 0.15, color = feat_type), position = "identity", linewidth = 4, alpha = 0.8) +
     geom_text(data = pex %>% distinct(seq_id, name, .keep_all = TRUE) %>% left_join(ymap, by = "seq_id"),
               aes(x = (start + end) / 2, y = y - 0.25, label = name), size = 1.9, color = "grey30", inherit.aes = FALSE) +
     geom_feat(data = feats(amplicons), aes(y = y + 0.17, yend = y + 0.17, color = feat_type), position = "identity", linewidth = 2.6) +
     geom_text(data = pamp %>% left_join(ymap, by = "seq_id"), aes(x = (start + end) / 2, y = y + 0.28, label = name),
               size = 2.3, color = "grey15", inherit.aes = FALSE) +
+    geom_feat(data = feats(indel), aes(y = y + 0.40, yend = y + 0.40, color = feat_type), position = "identity", linewidth = 4.5) +
+    geom_text(data = pind %>% left_join(ymap, by = "seq_id"), aes(x = end + 20, y = y + 0.40, label = name),
+              hjust = 0, size = 2.2, color = "#7B2D8B", inherit.aes = FALSE) +
     geom_gene(aes(fill = feat_type), color = NA, size = 6) +
     geom_gene_label(aes(label = name), size = 1.9, nudge_y = 0.07) +
     scale_color_manual(name = NULL,
-      values = c("homology" = "#7FA8C0", "Exon" = "#DAA520", "amplicon" = "#2E8B57", "off_target" = "#C0392B", "weak_off" = "grey60"),
-      labels = c("homology" = "Homology to the other products (blastn)", "Exon" = "Exon of overlapping gene",
+      values = c("homology" = "#7FA8C0", "Exon" = "#DAA520", "amplicon" = "#2E8B57", "off_target" = "#C0392B", "weak_off" = "grey60",
+                 "indel" = "#7B2D8B", "TE" = "#2C6E8F"),
+      labels = c("indel" = "InDel194 (Jia 2025), B73 coordinates", "TE" = "TE (EDTA; RIL003 not annotated)", "homology" = "Homology to the other products (blastn)", "Exon" = "Exon of overlapping gene",
                  "amplicon" = "Expected product (own locus / alt haplotype)", "off_target" = "Off-target, 3' ends match",
                  "weak_off" = "Off-target, 3' mismatch")) +
     scale_fill_manual(name = NULL, values = c("forward_primer" = "#1F6FB4", "reverse_primer" = "#B4451F"),
                       labels = c("forward_primer" = "forward primer", "reverse_primer" = "reverse primer")) +
-    coord_cartesian(ylim = c(0.45, nrow(pan) + 0.55)) +
+    guides(color = guide_legend(nrow = 2), fill = guide_legend(nrow = 2)) +
+    coord_cartesian(ylim = c(0.30, nrow(pan) + 0.62)) +
     labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq),
          subtitle = sprintf("%d products in %d genomes; window = product ± %d bp, primer orientation", nrow(pan), n_distinct(pan$genome), PADP),
          x = "position within window (bp)") +
@@ -739,7 +780,7 @@ knitr::kable(jia_map %>% transmute(name, accession, mism = ifelse(is.na(mism), "
              caption = "Mismatches of each Jia primer at its best site in each locus.")
 g1 <- jia_map %>% filter(name %in% c("ZmFd4-G-F1", "ZmFd4-G-R1")) %>% select(name, accession, pos) %>%
   pivot_wider(names_from = name, values_from = pos) %>% mutate(G1_bp = `ZmFd4-G-R1` - `ZmFd4-G-F1` + 1L)
-indel_pos <- (UP + 1L - 194L - 604L):(UP + 1L - 195L)               # B73 locus positions of the 604-bp block
+indel_pos <- INDEL194_LOC[1]:INDEL194_LOC[2]                     # B73 locus positions of the 604-bp block
 m4 <- aln[["ZmFd4"]]; bcols <- cons[["ZmFd4"]]$col[indel_pos]
 indel194 <- tibble(accession = rownames(m4), gapped = rowMeans(m4[, bcols, drop = FALSE] == "-")) %>%
   mutate(InDel194 = case_when(gapped > 0.8 ~ "Hap2 (deletion)", gapped < 0.2 ~ "Hap1 (full)", TRUE ~ "partial"))
@@ -751,8 +792,19 @@ knitr::kable(g1 %>% transmute(accession, `G-F1/G-R1 product (bp)` = G1_bp, `% of
 ## 11. Locus microsynteny (maps)
 
 ```{r maps, fig.height=7}
+# track order: parviglumis above B73, mexicana right below it (so the B73 links show InDel194), then the rest
+# by taxon; each accession's alt haplotype right after its primary
+TAXON_RANK <- c("parviglumis" = 1, "ssp. mays" = 2, "mexicana" = 3, "huehuetenangensis" = 4, "diploperennis" = 5,
+                "nicaraguensis" = 6, "luxurians" = 7)                 # matched against the taxon column
+track_order <- function(acc) {
+  base <- sub("_alt$", "", acc)
+  tx <- ACC$taxon[match(base, ACC$accession)]
+  rank <- map_dbl(tx, ~ { r <- TAXON_RANK[sapply(names(TAXON_RANK), grepl, x = .x, fixed = TRUE)]; if (length(r)) r[1] else 99 })
+  acc[order(rank, base, grepl("_alt$", acc))]
+}
 draw_gene <- function(g) {
   ls <- loci[[g]]
+  ls <- ls[track_order(names(ls))]
   seqs <- tibble(seq_id = names(ls), length = Biostrings::width(ls))
   ft <- feats %>% filter(gene == g, type %in% c("exon", "CDS")) %>%
     transmute(seq_id = accession, start, end, feat_type = type)
@@ -773,12 +825,20 @@ draw_gene <- function(g) {
     read_tsv(I(o), col_names = c("start","end","start2","end2","pident"), show_col_types = FALSE) %>%
       filter(start2 < end2) %>% mutate(seq_id = names(ls)[k], seq_id2 = names(ls)[k + 1])
   })
-  gggenomes(seqs = seqs, feats = list(ft, prim), links = links) +
+  ind <- if (g == "ZmFd4") tibble(seq_id = "B73", start = INDEL194_LOC[1], end = INDEL194_LOC[2], feat_type = "InDel194 (Jia 2025)") else
+    tibble(seq_id = character(), start = integer(), end = integer(), feat_type = character())
+  gg <- gggenomes(seqs = seqs, feats = list(ft, prim, ind), links = links)
+  ymap <- pull_seqs(gg$data) %>% ungroup() %>% select(seq_id, y)
+  gg +
     geom_link(aes(fill = pident), alpha = 0.35, colour = NA) +
     geom_seq() + geom_bin_label() +
     geom_feat(data = feats(ft), aes(colour = feat_type), linewidth = 4, position = "identity") +
+    geom_feat(data = feats(ind), aes(colour = feat_type, y = y + 0.12, yend = y + 0.12), linewidth = 4, position = "identity") +
+    geom_text(data = ind %>% left_join(ymap, by = "seq_id"), aes(x = (start + end) / 2, y = y + 0.24, label = "InDel194 (Jia 2025, 604 bp)"),
+              size = 2.6, colour = "#7B2D8B", inherit.aes = FALSE) +
     geom_feat(data = feats(prim), aes(colour = feat_type), linewidth = 6, position = "identity") +
-    scale_colour_manual(values = c(exon = "#DAA520", CDS = "#8B6914", "forward primer" = "#1F6FB4", "reverse primer" = "#B4451F"), name = NULL) +
+    scale_colour_manual(values = c(exon = "#DAA520", CDS = "#8B6914", "forward primer" = "#1F6FB4", "reverse primer" = "#B4451F",
+                                   "InDel194 (Jia 2025)" = "#7B2D8B"), name = NULL) +
     id_scale("fill", name = "% identity") +
     labs(title = sprintf("%s locus, ATG at %d (gene orientation)", g, UP + 1L),
          subtitle = if (nrow(fp)) sprintf("%s: %s / %s", fp$name, fp$F_seq, fp$R_seq) else "no pair passed") +
