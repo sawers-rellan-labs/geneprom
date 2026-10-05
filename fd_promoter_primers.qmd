@@ -1,6 +1,6 @@
 ---
 title: "ZmFd4 / ZmFd9 promoter primers across PanAnd teosintes"
-subtitle: "Orthologs → loci → alignment → conserved primer sites → Primer3 (2.5–3 kb) → per-accession binding + whole-genome e-PCR"
+subtitle: "Orthologs → loci → alignment → conserved primer sites → Primer3 (≤ 3 kb in every accession) → per-accession binding + whole-genome e-PCR"
 author: "thegemmalab@ncsu.edu"
 date: today
 params:
@@ -32,7 +32,12 @@ fragment and found InDel194, a 604-bp deletion upstream of the ATG).
 - Primer sites are chosen by **conservation, not coordinates**: a primer must sit on alignment
   columns that are identical and gap-free in **every** accession (pass 1). Only if pass 1 finds
   nothing are SNP columns allowed, as IUPAC degenerate bases, with an invariant 3′ 5 nt (pass 2).
-- **Product 2,500–3,000 bp** (Primer3), forward primer upstream of the ATG.
+- **Product ≤ 3,000 bp in every accession** (a longer PCR is impractical, and capping on B73 alone
+  would lose any longer allele). Among pairs under the cap, prefer the largest product in the
+  *shortest* accession (coverage), then Primer3 penalty. For ZmFd4 the 604-bp InDel194 is wider than
+  a 2.5–3-kb window, so Hap2 accessions give ~600 bp less than Hap1.
+- **Alternatives are independent:** each backup pair uses forward and reverse sites ≥ 50 bp away
+  from those of the pairs already chosen.
 - **Specificity:** forward e-PCR over each whole genome, as in `primermu`.
 
 ```{r setup}
@@ -56,7 +61,9 @@ THREADS <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
 
 GENES <- tibble(gene = c("ZmFd4", "ZmFd9"), b73_id = c("Zm00001eb083950", "Zm00001eb421930"))
 UP <- 6000L; DOWN <- 1000L                 # locus = ATG - UP .. CDS end + DOWN, in gene orientation
-PRODUCT <- c(2500L, 3000L)
+PRODUCT_MAX <- 3000L                       # hard cap, every accession
+P3_RANGE <- c(1500L, PRODUCT_MAX)          # Primer3 range on the B73 template; the cap is re-checked per accession
+N_PAIRS <- 3L; MIN_SEP <- 50L
 
 sh  <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = TRUE)
 out <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = FALSE)
@@ -286,12 +293,12 @@ run_p3 <- function(g, pass) {
   writeLines(c(sprintf("SEQUENCE_ID=%s_pass%d", g, pass), paste0("SEQUENCE_TEMPLATE=", tmpl),
     sprintf("SEQUENCE_PRIMER_PAIR_OK_REGION_LIST=0,%d,%d,%d", UP, b$start - 1L, b$end - b$start + 1L),
     "PRIMER_TASK=generic", "PRIMER_FIRST_BASE_INDEX=0", "PRIMER_PICK_INTERNAL_OLIGO=0",
-    sprintf("PRIMER_PRODUCT_SIZE_RANGE=%d-%d", PRODUCT[1], PRODUCT[2]),
+    sprintf("PRIMER_PRODUCT_SIZE_RANGE=%d-%d", P3_RANGE[1], P3_RANGE[2]),
     "PRIMER_MIN_SIZE=19", "PRIMER_OPT_SIZE=22", "PRIMER_MAX_SIZE=27",
     "PRIMER_MIN_TM=57.0", "PRIMER_OPT_TM=60.0", "PRIMER_MAX_TM=63.0", "PRIMER_PAIR_MAX_DIFF_TM=3.0",
     "PRIMER_MIN_GC=40.0", "PRIMER_OPT_GC_PERCENT=50.0", "PRIMER_MAX_GC=60.0",
     "PRIMER_GC_CLAMP=1", "PRIMER_MAX_POLY_X=4", "PRIMER_MAX_NS_ACCEPTED=0",
-    "PRIMER_EXPLAIN_FLAG=1", "PRIMER_NUM_RETURN=50", "="), p3in)
+    "PRIMER_EXPLAIN_FLAG=1", "PRIMER_NUM_RETURN=500", "="), p3in)
   sh(sprintf("primer3_core %s > %s", shQuote(p3in), shQuote(p3out)))
   L <- readLines(p3out); L <- L[grepl("=", L, fixed = TRUE) & L != "="]
   kv <- strsplit(L, "=", fixed = TRUE)
@@ -339,8 +346,17 @@ bind_check <- pairs %>% rowwise() %>% mutate(chk = list(map_dfr(names(loci[[gene
   mutate(all_bind = map_lgl(chk, ~ all(.x$F_sites == 1 & .x$R_sites == 1)),
          min_prod = map_int(chk, ~ suppressWarnings(min(.x$product))),
          max_prod = map_int(chk, ~ suppressWarnings(max(.x$product))))
-cand <- bind_check %>% filter(all_bind) %>% group_by(gene) %>% arrange(penalty, .by_group = TRUE) %>%
-  slice_head(n = 5) %>% mutate(name = sprintf("%s-P%d", gene, row_number())) %>% ungroup()
+# cap in every accession; rank by product in the shortest accession (50-bp bins), then penalty;
+# greedy pick of pairs whose F and R sites are both >= MIN_SEP from every pair already chosen
+pick <- function(d) {
+  d <- d %>% arrange(desc(min_prod %/% 50L), penalty); keep <- integer(0)
+  for (i in seq_len(nrow(d))) {
+    far <- all(abs(d$F_from_atg[i] - d$F_from_atg[keep]) >= MIN_SEP & abs(d$R_from_atg[i] - d$R_from_atg[keep]) >= MIN_SEP)
+    if (far) keep <- c(keep, i); if (length(keep) == N_PAIRS) break }
+  d[keep, ]
+}
+cand <- bind_check %>% filter(all_bind, max_prod <= PRODUCT_MAX) %>% group_by(gene) %>% group_modify(~ pick(.x)) %>%
+  mutate(name = sprintf("%s-P%d", gene, row_number())) %>% ungroup()
 knitr::kable(bind_check %>% count(gene, all_bind), caption = "Primer3 pairs whose both primers bind once in every accession.")
 ```
 
