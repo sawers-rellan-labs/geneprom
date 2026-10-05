@@ -23,6 +23,8 @@ From: mambaorg/micromamba:2.0.5
 
 %environment
     export PATH=/opt/conda/bin:$PATH
+    # conda activation hooks (QUARTO_DENO, QUARTO_PANDOC, R_HOME ...); apptainer exec does not activate the env
+    for f in /opt/conda/etc/conda/activate.d/*.sh; do . "$f"; done
     export LC_ALL=C.UTF-8
     export QUARTO_R=/opt/conda/bin/R
 

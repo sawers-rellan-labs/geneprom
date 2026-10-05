@@ -15,5 +15,6 @@ export PATH=/usr/local/apps/apptainer/1.4.2-1/bin:$PATH
 SIF=/share/maize/$USER/apptainer/geneprom.sif
 [ -f "$SIF" ] || { echo "missing $SIF: run sbatch container/build_container.sbatch first"; exit 1; }
 mkdir -p work
-apptainer exec -B /rsstu/users/r/rrellan/BZea/ref -B "$PWD" "$SIF" \
-  quarto render fd_promoter_primers.qmd -P mode:full
+# conda packages (quarto, r-base, ...) set their paths in activate.d scripts, which apptainer exec does not run
+apptainer exec -B /rsstu/users/r/rrellan/BZea/ref -B "$PWD" "$SIF" bash -c \
+  'for f in /opt/conda/etc/conda/activate.d/*.sh; do . "$f"; done; quarto render fd_promoter_primers.qmd -P mode:full'
