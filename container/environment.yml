@@ -33,6 +33,7 @@ dependencies:
   - r-patchwork
   - r-gggenomes
   - r-knitr
+  - r-codetools          # knitr chunk caching
   - r-rmarkdown
   - bioconductor-biostrings
   - r-ape

@@ -32,7 +32,7 @@ From: mambaorg/micromamba:2.0.5
     for t in samtools bedtools seqkit gffread blastn mafft primer3_core ntthal fimo mast e-PCR re-PCR FastTree quarto Rscript; do
         command -v $t >/dev/null || { echo "missing $t"; exit 1; }
     done
-    Rscript -e 'suppressPackageStartupMessages({library(gggenomes); library(Biostrings); library(ape); library(ggtree)})'
+    Rscript -e 'suppressPackageStartupMessages({library(gggenomes); library(Biostrings); library(ape); library(ggtree); library(codetools)})'
     quarto --version >/dev/null   # runs deno: catches a broken quarto install
 
 %labels
