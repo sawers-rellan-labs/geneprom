@@ -27,3 +27,6 @@ container/build_*.log
 # --- misc ---
 .DS_Store
 slurm-*.out
+
+# Quarto copies docs/pipeline.svg into its output dir (docs/), nesting it as docs/docs/
+docs/docs/
