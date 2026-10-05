@@ -1,0 +1,37 @@
+Bootstrap: docker
+From: mambaorg/micromamba:2.0.5
+
+# One image = one file on Hazel (inode-friendly) instead of ~50k files for a conda env.
+# Build:  sbatch container/build_container.sbatch
+
+%files
+    container/environment.yml /opt/environment.yml
+
+%post
+    set -eu
+    apt-get update && apt-get install -y --no-install-recommends build-essential git ca-certificates
+    micromamba install -y -n base -f /opt/environment.yml
+    micromamba env export -n base > /opt/environment.lock.yml
+    micromamba clean -a -y
+
+    # NCBI e-PCR 2.3.12, community fork patched for modern GCC
+    git clone --depth 1 https://github.com/faustovrz/e-pcr.git /tmp/e-pcr
+    cd /tmp/e-pcr && make links depend all OPTIMIZE=3
+    cp e-PCR re-PCR famap fahash /opt/conda/bin/
+    cd / && rm -rf /tmp/e-pcr
+    apt-get purge -y build-essential && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+%environment
+    export PATH=/opt/conda/bin:$PATH
+    export LC_ALL=C.UTF-8
+    export QUARTO_R=/opt/conda/bin/R
+
+%test
+    for t in samtools bedtools seqkit blastn mafft primer3_core ntthal fimo mast e-PCR re-PCR quarto Rscript; do
+        command -v $t >/dev/null || { echo "missing $t"; exit 1; }
+    done
+    Rscript -e 'suppressPackageStartupMessages({library(gggenomes); library(Biostrings)})'
+
+%labels
+    Project geneprom
+    Description ZmFd4/ZmFd9 promoter primers and annotation across PanAnd teosintes

@@ -1,0 +1,14 @@
+name	gene	purpose	seq
+ZmFd4-G-F1	ZmFd4	genotyping/resequencing	CCTCTCCATTTCTTCCGCACG
+ZmFd4-G-R1	ZmFd4	genotyping/resequencing	CTGTGCACCAACAAAAACCTAAG
+ZmFd4-G-F2	ZmFd4	genotyping/resequencing	TTGGTCATCTAGCCTGGTGT
+ZmFd4-G-R2	ZmFd4	genotyping/resequencing	GGCTCTCTTTGGAATGCGAG
+ZmFd4-JD-F	ZmFd4	knockout detection	CTCCTCTGCAACTTCATGGC
+ZmFd4-JD-R	ZmFd4	knockout detection	GCAGTCAGACGTCGGGTAC
+ZmFd4-S-JD-R	ZmFd4	knockout detection	GGACGAATCAAACCACAGCA
+ZmFd4-NIL-F	ZmFd4	NIL genotyping	GAAACGATTCCTGGCTTGCA
+ZmFd4-NIL-R	ZmFd4	NIL genotyping	GTGGTGAGGCGAAAGTTGC
+ZmFd9-JD-F	ZmFd9	knockout detection	GTGCTTGTTTGGGAGAAGGG
+ZmFd9-JD-R	ZmFd9	knockout detection	CAGCCCGGTCTAGTACAAGT
+ZmFd9-S-JD-F	ZmFd9	knockout detection	GCAACCTTCACATCATCCCC
+ZmFd9-S-JD-R	ZmFd9	knockout detection	GTGTGCCAAGGACAGTGTC

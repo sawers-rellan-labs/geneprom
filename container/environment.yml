@@ -1,0 +1,35 @@
+# geneprom tool environment, installed into the base env of geneprom.sif.
+# NCBI e-PCR is not on conda; it is compiled from github.com/faustovrz/e-pcr in geneprom.def.
+# The resolved, pinned versions are written to /opt/environment.lock.yml inside the image
+# (copy it out with: apptainer exec geneprom.sif cat /opt/environment.lock.yml).
+name: base
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # sequence handling
+  - samtools
+  - htslib
+  - bedtools
+  - seqkit
+  # homology / alignment
+  - blast
+  - mafft
+  - minimap2
+  # primer design (primer3_core, ntthal) and motifs (fimo, mast, meme)
+  - primer3
+  - meme
+  # R + report
+  - r-base=4.4
+  - r-dplyr
+  - r-tidyr
+  - r-readr
+  - r-stringr
+  - r-purrr
+  - r-ggplot2
+  - r-patchwork
+  - r-gggenomes
+  - r-knitr
+  - r-rmarkdown
+  - bioconductor-biostrings
+  - quarto

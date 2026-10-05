@@ -1,0 +1,5 @@
+project:
+  type: default
+  output-dir: docs
+  render:
+    - fd_promoter_primers.qmd

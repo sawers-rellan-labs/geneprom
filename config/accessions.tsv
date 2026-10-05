@@ -1,0 +1,11 @@
+accession	taxon	genome	gff	annotation
+B73	Zea mays ssp. mays (reference)	Zm-B73-REFERENCE-NAM-5.0.fa	Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.gff3	MaizeGDB Zm00001eb.1
+TIL01	Zea mays ssp. parviglumis	Zv-TIL01-REFERENCE-PanAnd-1.0.fa	Zv-TIL01-REFERENCE-PanAnd-1.0_Zv00001aa.1.gff3	PanAnd Zv00001aa.1
+TIL11	Zea mays ssp. parviglumis	Zv-TIL11-REFERENCE-PanAnd-1.0.fa	Zv-TIL11-REFERENCE-PanAnd-1.0_Zv00002aa.1.gff3	PanAnd Zv00002aa.1
+TIL18	Zea mays ssp. mexicana	Zx-TIL18-REFERENCE-PanAnd-1.0.fa	Zx-TIL18-REFERENCE-PanAnd-1.0_Zx00002aa.1.gff3	PanAnd Zx00002aa.1
+TIL25	Zea mays ssp. mexicana	Zx-TIL25-REFERENCE-PanAnd-1.0.fa	Zx-TIL25-REFERENCE-PanAnd-1.0_Zx00003aa.1.gff3	PanAnd Zx00003aa.1
+RIMHU001	Zea mays ssp. huehuetenangensis	Zh-RIMHU001-REFERENCE-PanAnd-1.0.fa	Zh-RIMHU001-REFERENCE-PanAnd-1.0_Zh00001aa.1.gff3	PanAnd Zh00001aa.1
+Gigi	Zea diploperennis	Zd-Gigi-REFERENCE-PanAnd-1.0.fa	Zd-Gigi-REFERENCE-PanAnd-1.0_Zd00001aa.1.gff3	PanAnd Zd00001aa.1
+Momo	Zea diploperennis	Zd-Momo-REFERENCE-PanAnd-1.0.fa	Zd-Momo-REFERENCE-PanAnd-1.0_Zd00003aa.1.gff3	PanAnd Zd00003aa.1
+PI615697	Zea nicaraguensis	Zn-PI615697-REFERENCE-PanAnd-1.0.fa	Zn-PI615697-REFERENCE-PanAnd-1.0_Zn00001aa.1.gff3	PanAnd Zn00001aa.1
+RIL003	Zea luxurians	Zl-RIL003-REFERENCE-PanAnd-1.0.fa.gz	Zl-RIL003-REFERENCE-PanAnd-1.0_helixer.gff.gz	Helixer (no PanAnd annotation)
