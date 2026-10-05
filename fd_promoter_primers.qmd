@@ -25,6 +25,11 @@ execute:
 assembly, so the region can be resequenced (cf. Jia *et al.* 2025, who resequenced a 2.9-kb ZmFd4
 fragment and found InDel194, a 604-bp deletion upstream of the ATG).
 
+## Bottom line
+
+::: {#bottom-line-slot}
+:::
+
 **Design rules.**
 
 - **Reverse primer** in the **first CDS exon** (in B73 v5 both genes start with a non-coding 5′UTR
@@ -584,6 +589,51 @@ knitr::kable(final %>% transmute(name, forward = F_seq, reverse = R_seq, `F Tm` 
 if (!nrow(final)) message("No pair passed: see the e-PCR table above.")
 ```
 
+## 9b. Amplicons aligned to B73
+
+Every e-PCR product of each recommended pair, in every genome — own locus, second (`alt`) haplotype,
+and any off-locus product — aligned (`blastn`) to the **B73 product** and drawn on B73 coordinates.
+Blocks = sequence shared with B73 (colour = % identity); a gap between blocks = sequence missing
+relative to B73 (e.g. InDel194 in ZmFd4 Hap2 accessions); dashed lines = primer sites. A haplotype
+with no track gave no product.
+
+```{r amplicons, fig.height=6}
+amp_track <- function(r) {
+  sfx <- case_when(r$hit_at == "own locus" ~ "", r$hit_at == "alt haplotype" ~ " alt",
+                   TRUE ~ sprintf(" %s:%.1f Mb (%s)", r$seq, r$from / 1e6, tolower(r$hit_at)))
+  paste0(taxon_prefix(r$genome), sfx)
+}
+amp_plot <- function(pr) {
+  e <- ep %>% filter(name == pr$name) %>% mutate(track = map_chr(seq_len(n()), ~ amp_track(cur_data_all()[.x, ])))
+  e$sq <- map(seq_len(nrow(e)), function(k) grab(e$genome[k], e$seq[k], e$from[k], e$to[k] + 1L, e$strand[k] == "-"))
+  ref_k <- which(e$genome == "B73" & e$hit_at == "own locus")[1]
+  rf <- tempfile(fileext = ".fa"); writeXStringSet(DNAStringSet(setNames(list(e$sq[[ref_k]]), "B73")), rf)
+  blk <- map_dfr(seq_len(nrow(e)), function(k) {
+    qf <- tempfile(fileext = ".fa"); writeXStringSet(DNAStringSet(setNames(list(e$sq[[k]]), "q")), qf)
+    o <- out(sprintf("blastn -query %s -subject %s -evalue 1e-10 -outfmt '6 qstart qend sstart send pident'", qf, rf))
+    if (!length(o)) return(NULL)
+    read_tsv(I(o), col_names = c("qstart", "qend", "sstart", "send", "pident"), show_col_types = FALSE) %>%
+      filter(sstart < send) %>% mutate(track = e$track[k])
+  })
+  L <- length(e$sq[[ref_k]]); lf <- nchar(pr$F_seq); lr <- nchar(pr$R_seq)
+  lev <- e %>% mutate(o = case_when(genome == "B73" & hit_at == "own locus" ~ 0, hit_at == "own locus" ~ 1,
+                                    hit_at == "alt haplotype" ~ 1.5, TRUE ~ 3)) %>% arrange(o, track) %>% pull(track) %>% unique()
+  sizes <- e %>% transmute(track, bp = to - from + 2L)
+  ggplot(blk, aes(y = factor(track, levels = rev(lev)))) +
+    annotate("rect", xmin = c(1, L - lr + 1), xmax = c(lf, L), ymin = -Inf, ymax = Inf, fill = "grey85") +
+    geom_segment(aes(x = sstart, xend = send, yend = factor(track, levels = rev(lev)), colour = pident), linewidth = 4.5) +
+    geom_text(data = sizes, aes(x = L * 1.02, label = sprintf("%s bp", format(bp, big.mark = ","))), hjust = 0, size = 3) +
+    scale_colour_viridis_c(option = "C", limits = c(85, 100), oob = scales::squish, name = "% identity\nto B73") +
+    scale_x_continuous(limits = c(1, L * 1.14), labels = scales::comma) +
+    labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq), x = "position in the B73 product (bp)", y = NULL,
+         subtitle = sprintf("%d products in %d genomes; grey = primer sites", nrow(e), n_distinct(e$genome))) +
+    theme_bw() + theme(panel.grid.minor = element_blank())
+}
+for (i in seq_len(nrow(final))) {
+  p <- amp_plot(final[i, ]); ggsave(file.path(RES, sprintf("amplicons_%s.png", final$name[i])), p, width = 11, height = 6, dpi = 150); print(p)
+}
+```
+
 ## 10. Jia *et al.* 2025 primers as a benchmark
 
 Jia's primers mapped onto every locus (up to 3 mismatches). For ZmFd4, the G-F1/G-R1 product size
@@ -644,6 +694,25 @@ draw_gene <- function(g) {
     theme(legend.position = "bottom")
 }
 for (g in GENES$gene) { p <- draw_gene(g); ggsave(file.path(RES, sprintf("map_%s.png", g)), p, width = 12, height = 7, dpi = 150); print(p) }
+```
+
+```{r bottom-line, results="asis"}
+n_alt <- orth %>% filter(hap == "alt"); unpl <- orth %>% filter(hap == "primary", placement == "unplaced")
+fd4_alleles <- if (exists("g1")) g1 %>% filter(!is.na(G1_bp)) %>% mutate(a = ifelse(G1_bp > 1700, "Hap1", "Hap2")) %>% count(a) else NULL
+pairs_md <- if (nrow(final)) paste0("| Pair | Forward | Reverse | Product (all loci) | Off-locus products* |\n|---|---|---|---|---|\n",
+  paste(sprintf("| **%s** | `%s` | `%s` | %s–%s bp | %d |", final$name, final$F_seq, final$R_seq,
+                format(final$min_prod, big.mark = ","), format(final$max_prod, big.mark = ","), final$weak_off), collapse = "\n")) else
+  "**No pair passed** — see §8 and §9."
+cat('::: {#bottom-line-content}\n',
+    sprintf("- **Orthologs:** ZmFd4 and ZmFd9 found in all %d genomes by protein reciprocal best hit (§3, tree §3b).", nrow(ACC)),
+    if (nrow(n_alt)) sprintf(" Second haplotypes (`alt`): %s.", paste(sprintf("%s %s", taxon_prefix(n_alt$genome), sub("Zm", "", n_alt$gene)), collapse = ", ")) else "",
+    if (nrow(unpl)) sprintf(" **Unplaced** (no copy on a chromosome): %s.", paste(sprintf("%s %s", taxon_prefix(unpl$genome), sub("Zm", "", unpl$gene)), collapse = ", ")) else "",
+    "\n", if (!is.null(fd4_alleles)) sprintf("- **ZmFd4 InDel194** (Jia G-F1/G-R1 product): %s.\n",
+                                             paste(sprintf("%s in %d loci", fd4_alleles$a, fd4_alleles$n), collapse = ", ")) else "",
+    "- **Recommended pairs** — each binds every locus once (both haplotypes), no degenerate bases unless stated, ",
+    "no off-locus product with matching 3′ ends in any genome (§8); amplicons aligned to B73 in §9b:\n\n", pairs_md,
+    "\n\n<small>* off-locus products with a mismatch in a primer's 3′-most 5 nt (not expected to amplify).</small>\n:::\n",
+    '<script>document.getElementById("bottom-line-slot").appendChild(document.getElementById("bottom-line-content"));</script>\n', sep = "")
 ```
 
 ## Next / TODO (student)
