@@ -90,7 +90,10 @@ cat(sprintf("mode = %s | %d accessions | reference dir %s\n", MODE, nrow(ACC), R
 The reference data are an **assumed starting point** (see README, "Inputs"): for every accession in
 `r REF`, a plain-FASTA genome with its nucleotide BLAST DB, its gene annotation, and its proteome
 with a samtools index and a protein BLAST DB (all DBs `-parse_seqids`). Preparing them (download,
-decompression, indexing) is done once outside this notebook. Only the genome `.fai` indexes are
+decompression, indexing) is done once outside this notebook. The three expensive steps — ortholog
+searches (§3), alignment (§5) and whole-genome e-PCR (§8) — are cached by knitr and rerun only when
+their inputs change (keyed on a hash of the queries, loci and candidate pairs), so re-rendering after
+a text or figure change takes about a minute. Only the genome `.fai` indexes are
 written here, to `work/`; nothing is ever written to `r REF`.
 
 ```{r genomes}
@@ -182,6 +185,9 @@ Standard protein-level orthology (as in OrthoMCL / OrthoFinder / GENESPACE, redu
    bind too. The full gene tree (§3b) shows every candidate so each call can be judged.
 
 ```{r orthologs}
+#| cache: true
+#| cache.lazy: false
+#| cache.extra: !expr c(tools::md5sum(c(qpfa, qfa)), rlang::hash(ACC))
 bl6 <- function(cmd, cols) { o <- out(cmd); if (!length(o)) return(NULL)
   read_tsv(I(o), col_names = cols, show_col_types = FALSE, col_types = cols(.default = "c")) %>% type_convert(guess_integer = TRUE) }
 bp_cols <- c("qseqid","sseqid","pident","length","qstart","qend","sstart","send","evalue","bitscore","qlen","slen")
@@ -375,6 +381,9 @@ Conservation is evaluated on **B73 coordinates** of the alignment:
 - **SNP** = all accessions have a base (no gap/insertion) but not the same one — allowed only in pass 2.
 
 ```{r align}
+#| cache: true
+#| cache.lazy: false
+#| cache.extra: !expr tools::md5sum(file.path(WORK, "loci", paste0(GENES$gene, ".fa")))
 aln <- map(set_names(GENES$gene), function(g) {
   af <- file.path(WORK, "aln", paste0(g, ".aln.fa"))
   lf <- file.path(WORK, "loci", paste0(g, ".fa"))
@@ -516,6 +525,9 @@ as a real off-target only if **neither primer has a mismatch in its 3′-most 5 
 blocks extension).
 
 ```{r epcr}
+#| cache: true
+#| cache.lazy: false
+#| cache.extra: !expr rlang::hash(list(cand$name, cand$F_seq, cand$R_seq, ACC$fa, orth))
 jia <- read_tsv("config/jia2025_primers.tsv", show_col_types = FALSE)
 jia_pairs <- tibble(name = c("Jia-G1 (G-F1/G-R1)", "Jia-G2 (G-F2/G-R2)", "Jia-Fd9-JD"), gene = c("ZmFd4", "ZmFd4", "ZmFd9"),
                     F_seq = jia$seq[match(c("ZmFd4-G-F1", "ZmFd4-G-F2", "ZmFd9-JD-F"), jia$name)],
