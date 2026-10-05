@@ -266,7 +266,8 @@ knitr::kable(cands %>% count(genome, source, rbh = ifelse(is.na(ortholog_of), "n
 Every candidate from §3 (annotated proteins from the proteomes, unannotated copies translated from
 the genome), with the eleven B73 ferredoxins named in Jia *et al.* 2025 (Supplementary Table 1;
 `config/zm_ferredoxins.tsv`), aligned with MAFFT and placed by FastTree (LG). Rooted on ZmFd7
-(mitochondrial adrenodoxin). Labels give the locus, the gene model (or *unannotated*), and the call:
+(mitochondrial adrenodoxin). Labels give the gene model (or *unannotated*), the assembly's taxon prefix
+(`Zx-TIL18`, `Zn-PI615697`, …), the locus, and the call:
 ortholog (haplotype, placement), RBH but not chosen, or the B73 gene it maps back to.
 
 ```{r gene-tree, fig.height=13}
@@ -277,13 +278,14 @@ fd_prot <- if (any(!is.na(fd_pid))) get_prot("B73", fd_pid[!is.na(fd_pid)]) else
 fd_tips <- tibble(tip = sprintf("%s (%s)", FD$short_name, FD$b73_id)[!is.na(fd_pid)], group = "B73 ferredoxin", b73 = TRUE,
                   prot = sub("\\*$", "", as.character(fd_prot)))
 name_of <- function(g) ifelse(g %in% FD$b73_id, FD$short_name[match(g, FD$b73_id)], g)
+taxon_prefix <- function(a) sub("(-REFERENCE.*|\\.fa(\\.gz)?)$", "", ACC$genome[match(a, ACC$accession)])   # Zx-TIL18, Zm-B73, ...
 cand_tips <- cands %>% filter(!(genome == "B73" & model_id %in% FD$b73_id)) %>%
   left_join(orth %>% select(genome, cand, hap), by = c("genome", "cand")) %>%
   mutate(call = case_when(!is.na(hap) ~ sprintf("%s ortholog, %s, %s", sub("Zm", "", ortholog_of), hap, placement),
                           !is.na(ortholog_of) ~ sprintf("RBH %s, not chosen, %s", ortholog_of, placement),
                           TRUE ~ sprintf("back-hit %s", name_of(back_best))),
          call = ifelse(qcov < 0.7, paste0(call, ", partial"), call),
-         tip = sprintf("%s %s:%.2f Mb %s [%s]", genome, chr, lo / 1e6, ifelse(is.na(model_id), "unannotated", model_id), call),
+         tip = sprintf("%s %s %s:%.2f Mb [%s]", ifelse(is.na(model_id), "unannotated", model_id), taxon_prefix(genome), chr, lo / 1e6, call),
          group = ifelse(!is.na(hap), sprintf("%s ortholog", sub("Zm", "", ortholog_of)), "other candidate"), b73 = genome == "B73") %>%
   select(tip, group, b73, prot)
 tp <- bind_rows(fd_tips, cand_tips) %>% filter(nchar(prot) >= 50)
@@ -321,9 +323,21 @@ orth <- orth %>% mutate(
   to   = ifelse(strand == "+", cds_end + DOWN, atg + UP))
 to_locus <- function(g, o) if (o$strand == "+") g - o$from + 1L else o$to - g + 1L
 
+# A locus can run past the end of its contig (e.g. a short alt scaffold): extract the part that exists and pad the
+# missing end with N, so the A of the ATG stays at position UP + 1 in every locus. N columns are never primer sites.
+seq_len_of <- function(genome, chr) { f <- read_tsv(ACC$fai[ACC$accession == genome], col_names = c("chr", "len"),
+                                                    col_types = "ci___", show_col_types = FALSE); f$len[f$chr == chr] }
+orth <- orth %>% rowwise() %>% mutate(chr_len = seq_len_of(genome, chr)) %>% ungroup() %>%
+  mutate(pad_lo = pmax(0L, 1L - from), pad_hi = pmax(0L, to - chr_len),
+         pad5 = ifelse(strand == "+", pad_lo, pad_hi), pad3 = ifelse(strand == "+", pad_hi, pad_lo))
+if (any(orth$pad5 + orth$pad3 > 0))
+  message("loci padded with N at a contig end: ", paste(with(filter(orth, pad5 + pad3 > 0), sprintf("%s %s (5' %d, 3' %d bp)", accession, gene, pad5, pad3)), collapse = "; "))
 loci <- map(set_names(GENES$gene), function(g) {
   oo <- orth %>% filter(gene == g)
-  s <- DNAStringSet(map(seq_len(nrow(oo)), function(k) grab(oo$genome[k], oo$chr[k], oo$from[k], oo$to[k], oo$strand[k] == "-")))
+  s <- DNAStringSet(map(seq_len(nrow(oo)), function(k) {
+    core <- grab(oo$genome[k], oo$chr[k], max(1L, oo$from[k]), min(oo$chr_len[k], oo$to[k]), oo$strand[k] == "-")
+    xscat(DNAString(strrep("N", oo$pad5[k])), core, DNAString(strrep("N", oo$pad3[k])))
+  }))
   names(s) <- oo$accession
   writeXStringSet(s, file.path(WORK, "loci", paste0(g, ".fa")))
   s
@@ -512,17 +526,31 @@ ep <- ep %>% rowwise() %>% mutate(hit_at = {
   if (!nrow(o)) "elsewhere" else if (o$gene[1] != pair_gene) "PARALOG" else if (o$hap[1] == "alt") "alt haplotype" else "own locus"
 }) %>% ungroup()
 
-# 3'-end mismatches of each primer site (IUPAC-aware), as in primermu
+# Mismatches of each primer at its site, IUPAC-aware and gap-aware (e-PCR -g 1 allows one gap per primer, so an
+# ungapped comparison misreads every base after the gap). Each primer is aligned (edit distance) to a window that
+# starts at its 5' end on the outer edge of the product and is G bases longer than the primer; mismatches and gaps
+# are counted overall and within the 3'-most 5 nt (a gap between two bases is assigned to the 3'-side base).
 iupac_set <- list(A="A",C="C",G="G",T="T",R="AG",Y="CT",S="CG",W="AT",K="GT",M="AC",B="CGT",D="AGT",H="ACT",V="ACG",N="ACGT")
-mm3 <- function(site, p) { a <- strsplit(site, "")[[1]]; b <- strsplit(p, "")[[1]]; n <- length(b)
-  bad <- vapply(seq_len(n), function(k) !grepl(a[k], iupac_set[[b[k]]], fixed = TRUE), logical(1))
-  c(total = sum(bad), end3 = sum(bad[(n - 4):n])) }
+G_SLACK <- 3L
+align_primer <- function(site, p) {
+  a <- strsplit(site, "")[[1]]; b <- strsplit(p, "")[[1]]; n <- length(b); m <- length(a)
+  mis <- function(i, j) !grepl(a[j], iupac_set[[b[i]]], fixed = TRUE)
+  D <- matrix(Inf, n + 1, m + 1); D[1, ] <- 0:m; D[, 1] <- 0:n
+  for (i in 1:n) for (j in 1:m) D[i + 1, j + 1] <- min(D[i, j] + mis(i, j), D[i, j + 1] + 1, D[i + 1, j] + 1)
+  i <- n + 1; j <- which.min(D[n + 1, ]); total <- D[i, j]; ev <- integer(0)
+  while (i > 1) {
+    if (j > 1 && D[i, j] == D[i - 1, j - 1] + mis(i - 1, j - 1)) { if (mis(i - 1, j - 1)) ev <- c(ev, i - 1); i <- i - 1; j <- j - 1 }
+    else if (D[i, j] == D[i - 1, j] + 1) { ev <- c(ev, i - 1); i <- i - 1 }   # primer base unpaired
+    else { ev <- c(ev, i); j <- j - 1 }                                          # extra genome base before primer base i
+  }
+  c(total = total, end3 = sum(ev > n - 5))
+}
 ep <- ep %>% rowwise() %>% mutate(m = list({
-  lf <- nchar(F_seq); lr <- nchar(R_seq); TO <- to + 1L
-  if (strand == "+") { fs <- c(from, from + lf - 1L); rs <- c(TO - lr + 1L, TO); frc <- FALSE; rrc <- TRUE }
-  else               { fs <- c(TO - lf + 1L, TO); rs <- c(from, from + lr - 1L); frc <- TRUE;  rrc <- FALSE }
-  cf <- mm3(as.character(grab(genome, seq, fs[1], fs[2], frc)), F_seq)
-  cr <- mm3(as.character(grab(genome, seq, rs[1], rs[2], rrc)), R_seq)
+  lf <- nchar(F_seq) + G_SLACK; lr <- nchar(R_seq) + G_SLACK; TO <- to + 1L
+  # windows start at each primer's 5' end (outer product edge), in primer orientation
+  if (strand == "+") { fw <- grab(genome, seq, from, from + lf - 1L);     rw <- grab(genome, seq, TO - lr + 1L, TO, TRUE) }
+  else               { fw <- grab(genome, seq, TO - lf + 1L, TO, TRUE);  rw <- grab(genome, seq, from, from + lr - 1L) }
+  cf <- align_primer(as.character(fw), F_seq); cr <- align_primer(as.character(rw), R_seq)
   tibble(F_mm = cf[["total"]], F_3p = cf[["end3"]], R_mm = cr[["total"]], R_3p = cr[["end3"]])
 })) %>% ungroup() %>% unnest(m) %>%
   mutate(amp_bp = to - from + 2L, real_off = hit_at %in% c("elsewhere", "PARALOG") & F_3p == 0 & R_3p == 0)
