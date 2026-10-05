@@ -210,6 +210,7 @@ dependencies:
   - r-cachem=1.1.0=r44h54b55ab_2
   - r-cli=3.6.6=r44h3697838_0
   - r-clipr=0.8.1=r44hc72bb7e_0
+  - r-codetools=0.2_20=r44hc72bb7e_2
   - r-colorspace=2.1_3=r44h54b55ab_0
   - r-commonmark=2.0.0=r44h54b55ab_1
   - r-cpp11=0.5.5=r44h785f33e_0
