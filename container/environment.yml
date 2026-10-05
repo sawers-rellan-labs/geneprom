@@ -19,6 +19,8 @@ dependencies:
   # primer design (primer3_core, ntthal) and motifs (fimo, mast, meme)
   - primer3
   - meme
+  # gene tree
+  - fasttree
   # R + report
   - r-base=4.4
   - r-dplyr
@@ -32,4 +34,6 @@ dependencies:
   - r-knitr
   - r-rmarkdown
   - bioconductor-biostrings
+  - r-ape
+  - bioconductor-ggtree
   - quarto

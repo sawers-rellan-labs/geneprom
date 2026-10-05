@@ -44,7 +44,7 @@ fragment and found InDel194, a 604-bp deletion upstream of the ATG).
 suppressPackageStartupMessages({
   library(Biostrings)                       # first, so dplyr/purrr verbs (slice, filter, reduce) win
   library(gggenomes); library(ggplot2); library(readr); library(dplyr); library(tidyr)
-  library(stringr); library(purrr)
+  library(stringr); library(purrr); library(ape); library(ggtree)
 })
 
 MODE <- params$mode
@@ -67,7 +67,7 @@ N_PAIRS <- 3L; MIN_SEP <- 50L
 
 sh  <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = TRUE)
 out <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = FALSE)
-tools <- c("samtools", "blastn", "makeblastdb", "mafft", "primer3_core", "e-PCR")
+tools <- c("samtools", "blastn", "makeblastdb", "mafft", "primer3_core", "e-PCR", "FastTree")
 miss <- tools[Sys.which(tools) == ""]
 if (length(miss)) stop("missing tools: ", paste(miss, collapse = ", "))
 cat(sprintf("mode = %s | %d accessions | reference dir %s\n", MODE, nrow(ACC), REF))
@@ -197,8 +197,6 @@ pick_locus <- function(d, hap) {
 orth <- ocand %>% group_split(genome, qseqid) %>% map_dfr(~ bind_rows(pick_locus(.x, "primary"), pick_locus(.x, "alt")))
 rbh_tbl <- ocand %>% group_by(genome, gene = qseqid) %>%
   summarise(candidates = n(), rbh_pass = sum(rbh), rejected_as = paste(unique(back_best[!rbh]), collapse = ","), .groups = "drop")
-missing <- ACC %>% select(genome = accession) %>% crossing(gene = GENES$gene) %>% anti_join(orth %>% filter(hap == "primary"), by = c("genome", "gene"))
-if (nrow(missing)) stop("no primary ortholog for: ", paste(missing$genome, missing$gene, collapse = "; "))
 
 # gene model overlapping each hit
 models <- map_dfr(seq_len(nrow(orth)), function(k) {
@@ -221,6 +219,78 @@ knitr::kable(orth %>% transmute(gene, accession, hap, model_id, locus = sprintf(
 knitr::kable(rbh_tbl, caption = "Candidates per genome and gene; rejected_as = the B73 gene a rejected candidate maps back to.")
 ```
 
+## 3b. Gene tree of every hit
+
+Every locus hit by either CDS query (≥ 40 % of the CDS, so partial copies are included) in every
+genome, translated, aligned (MAFFT) and placed in an approximate-ML tree (FastTree, LG) together with
+the eleven B73 ferredoxins named in Jia *et al.* 2025 (Supplementary Table 1; NCBI proteins mapped to
+B73 v5 genes by `tblastn`, `config/zm_ferredoxins.tsv`). Proteins come from the annotated CDS when a
+gene model overlaps the hit, otherwise from the hit extended to the full query CDS length. Rooted on
+ZmFd7 (mitochondrial adrenodoxin).
+
+```{r gene-tree, fig.height=11}
+FD <- read_tsv("config/zm_ferredoxins.tsv", show_col_types = FALSE)
+gff_cds_seq <- function(genome_acc, gff_rows) {           # spliced CDS of the canonical transcript
+  tx <- gff_rows %>% filter(type == "mRNA") %>% arrange(desc(grepl("canonical_transcript=1", attr))) %>% slice(1)
+  cds <- gff_rows %>% filter(type == "CDS", Parent == tx$ID)
+  if (!nrow(cds)) return(NULL)
+  rc <- cds$strand[1] == "-"; cds <- if (rc) arrange(cds, desc(start)) else arrange(cds, start)
+  do.call(xscat, map(seq_len(nrow(cds)), ~ grab(genome_acc, cds$seqid[.x], cds$start[.x], cds$end[.x], rc)))
+}
+to_prot <- function(d) { d <- subseq(d, 1, length(d) - length(d) %% 3)
+  p <- as.character(translate(d, if.fuzzy.codon = "solve")); p <- sub("\\*$", "", p); gsub("\\*", "X", p) }
+
+# B73 family members (by name)
+fd_rows <- read_gff(b73$gff, sprintf("$9 ~ /(%s)/", paste(FD$b73_id, collapse = "|")))
+fd_prot <- map_dfr(seq_len(nrow(FD)), function(k) {
+  r <- fd_rows %>% filter(str_detect(attr, FD$b73_id[k]))
+  d <- if (nrow(r)) gff_cds_seq("B73", r) else NULL
+  if (is.null(d)) return(NULL)
+  tibble(tip = sprintf("%s (%s)", FD$short_name[k], FD$b73_id[k]), genome = "B73", group = "B73 ferredoxin", prot = to_prot(d))
+})
+
+# teosinte loci: merge overlapping hits of the two queries, keep the best one per locus
+tl <- hits %>% filter(genome != "B73", qcov >= 0.4) %>% arrange(genome, sseqid, lo) %>%
+  group_by(genome, sseqid) %>% mutate(locus = cumsum(lo > lag(cummax(hi), default = -Inf) + 100)) %>%
+  group_by(genome, sseqid, locus) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup() %>%
+  left_join(ocand %>% select(genome, sseqid, lo, hi, qseqid, rbh, back_best), by = c("genome", "sseqid", "lo", "hi", "qseqid"))
+tl_prot <- map_dfr(seq_len(nrow(tl)), function(k) {
+  h <- tl[k, ]; g <- ACC$gff[ACC$accession == h$genome]
+  atg <- if (h$strand == "+") h$sstart - (h$qstart - 1L) else h$sstart + (h$qstart - 1L)
+  cend <- if (h$strand == "+") h$send + (h$qlen - h$qend) else h$send - (h$qlen - h$qend)
+  gm <- read_gff(g, sprintf("$1==\"%s\" && $5>=%d && $4<=%d", h$sseqid, h$lo, h$hi))
+  gmod <- if (is.null(gm)) NULL else gm %>% filter(type == "gene", strand == h$strand) %>% slice(1)
+  d <- NULL; src <- "hit"
+  if (!is.null(gmod) && nrow(gmod)) {
+    d <- gff_cds_seq(h$genome, read_gff(g, sprintf("$1==\"%s\" && $9 ~ /%s/", h$sseqid, gmod$ID))); src <- gmod$ID }
+  if (is.null(d)) d <- grab(h$genome, h$sseqid, min(atg, cend), max(atg, cend), h$strand == "-")
+  role <- orth %>% filter(genome == h$genome, chr == h$sseqid, pmin(atg, cds_end) <= h$hi, pmax(atg, cds_end) >= h$lo)
+  role <- if (nrow(role)) sprintf("%s ortholog (%s)", sub("Zm", "", role$gene[1]), role$hap[1]) else
+          if (isTRUE(h$rbh)) "RBH, not chosen" else sprintf("maps back to %s", h$back_best)
+  tibble(tip = sprintf("%s %s:%.2f Mb %s [%s]", h$genome, h$sseqid, h$lo / 1e6, ifelse(src == "hit", "unannotated", src), role),
+         genome = h$genome, group = ifelse(grepl("ortholog", role), sub(" \\(.*", "", role), "other hit"), prot = to_prot(d))
+})
+tp <- bind_rows(fd_prot, tl_prot) %>% filter(nchar(prot) >= 50)
+pfa <- file.path(WORK, "tree_proteins.faa"); afa <- file.path(WORK, "tree_proteins.aln.faa"); nwk <- file.path(RES, "ferredoxin_tree.nwk")
+writeXStringSet(AAStringSet(setNames(tp$prot, sprintf("t%03d", seq_len(nrow(tp))))), pfa)
+sh(sprintf("mafft --auto --quiet %s > %s", shQuote(pfa), shQuote(afa)))
+sh(sprintf("FastTree -lg -quiet %s > %s", shQuote(afa), shQuote(nwk)))
+tr <- read.tree(nwk); tr$tip.label <- tp$tip[as.integer(sub("^t", "", tr$tip.label))]
+out_tip <- grep("^ZmFd7 ", tr$tip.label, value = TRUE)
+if (length(out_tip)) tr <- root(tr, outgroup = out_tip, resolve.root = TRUE)
+write.tree(tr, nwk)
+grp <- tp %>% transmute(label = tip, group, b73 = genome == "B73")
+ggtree(tr) %<+% grp + geom_tippoint(aes(colour = group), size = 1.6) +
+  geom_tiplab(aes(colour = group, fontface = ifelse(b73, "bold", "plain")), size = 3, offset = 0.01, show.legend = FALSE) +
+  geom_nodelab(aes(label = ifelse(!is.na(suppressWarnings(as.numeric(label))) & as.numeric(label) >= 0.7, label, "")),
+               size = 2.2, hjust = 1.3, vjust = -0.4, colour = "grey40") +
+  scale_colour_manual(values = c("B73 ferredoxin" = "black", "Fd4 ortholog" = "#1F6FB4", "Fd9 ortholog" = "#B4451F", "other hit" = "grey50"), name = NULL) +
+  xlim(0, max(node.depth.edgelength(tr)) * 2.2) + theme(legend.position = "bottom") +
+  labs(title = "Ferredoxin proteins: B73 family + every Fd4/Fd9 hit in the teosinte genomes",
+       subtitle = "FastTree (LG); node labels = local support ≥ 0.7; rooted on ZmFd7 (mitochondrial adrenodoxin)")
+ggsave(file.path(RES, "ferredoxin_tree.png"), width = 11, height = 11, dpi = 150)
+```
+
 ## 4. Loci in gene orientation
 
 Each locus runs from `r UP` bp upstream of the ATG to `r DOWN` bp past the CDS end, reverse
@@ -228,6 +298,8 @@ complemented for minus-strand genes, so position `r UP + 1` is the A of the ATG 
 Gene-model features are projected onto the same coordinates.
 
 ```{r loci}
+missing <- ACC %>% select(genome = accession) %>% crossing(gene = GENES$gene) %>% anti_join(orth %>% filter(hap == "primary"), by = c("genome", "gene"))
+if (nrow(missing)) stop("no primary ortholog for: ", paste(missing$genome, missing$gene, collapse = "; "))
 orth <- orth %>% mutate(
   from = ifelse(strand == "+", atg - UP, cds_end - DOWN),
   to   = ifelse(strand == "+", cds_end + DOWN, atg + UP))
