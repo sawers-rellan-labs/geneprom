@@ -36,16 +36,18 @@ graph LR
         p3 -->|primer| bind
     end
 
-    subgraph output [Specificity and output §8-10]
+    subgraph output [Specificity and output §8-11]
         %%metro entry: left | primer
         jia[Jia 2025 primers]
         epcr[whole-genome e-PCR]
         amp[amplicons vs B73]
+        synt[locus microsynteny]
         pairs[pairs]
 
         jia -->|check| epcr
         epcr -->|primer| pairs
         epcr -->|check| amp
+        epcr -->|check| synt
     end
 
     rbh -->|primer| loci

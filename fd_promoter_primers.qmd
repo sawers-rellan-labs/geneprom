@@ -664,7 +664,7 @@ knitr::kable(g1 %>% transmute(accession, `G-F1/G-R1 product (bp)` = G1_bp,
              caption = "ZmFd4 InDel194 call from Jia's G-F1/G-R1 product (B73 Hap1 ≈ 1,908 bp; Hap2 ≈ 604 bp shorter).")
 ```
 
-## 11. Maps
+## 11. Locus microsynteny (maps)
 
 ```{r maps, fig.height=7}
 draw_gene <- function(g) {
