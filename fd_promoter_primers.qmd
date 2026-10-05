@@ -287,7 +287,7 @@ the genome), with the eleven B73 ferredoxins named in Jia *et al.* 2025 (Supplem
 (`Zx-TIL18`, `Zn-PI615697`, …), the locus, and the call:
 ortholog (haplotype, placement), RBH but not chosen, or the B73 gene it maps back to.
 
-```{r gene-tree, fig.height=13}
+```{r gene-tree, fig.height=18}
 FD <- read_tsv("config/zm_ferredoxins.tsv", show_col_types = FALSE)
 fd_cn  <- canonical(read_gff(b73$gff, sprintf("$3==\"mRNA\" && $9 ~ /(%s)/", paste(FD$b73_id, collapse = "|"))) %||% tibble(type = character()))
 fd_pid <- fd_cn$pid[match(FD$b73_id, fd_cn$gene_id)]
@@ -315,7 +315,7 @@ out_tip <- grep("^ZmFd7 ", tr$tip.label, value = TRUE)
 if (length(out_tip)) tr <- root(tr, outgroup = out_tip, resolve.root = TRUE)
 write.tree(tr, nwk)
 ggtree(tr) %<+% (tp %>% transmute(label = tip, group, b73)) + geom_tippoint(aes(colour = group), size = 1.6) +
-  geom_tiplab(aes(colour = group, fontface = ifelse(b73, "bold", "plain")), size = 2.8, offset = 0.01, show.legend = FALSE) +
+  geom_tiplab(aes(colour = group, fontface = ifelse(b73, "bold", "plain")), size = 3.15, offset = 0.01, show.legend = FALSE) +   # 2.8 mm + 1 pt
   geom_nodelab(aes(label = ifelse(!is.na(suppressWarnings(as.numeric(label))) & as.numeric(label) >= 0.7, label, "")),
                size = 2.2, hjust = 1.3, vjust = -0.4, colour = "grey40") +
   scale_colour_manual(values = c("B73 ferredoxin" = "black", "Fd4 ortholog" = "#1F6FB4", "Fd9 ortholog" = "#B4451F",
@@ -323,7 +323,7 @@ ggtree(tr) %<+% (tp %>% transmute(label = tip, group, b73)) + geom_tippoint(aes(
   xlim(0, max(node.depth.edgelength(tr)) * 2.4) + theme(legend.position = "bottom") +
   labs(title = "Ferredoxin proteins: the 11 named B73 ferredoxins + every ZmFd4 / ZmFd9 candidate in every genome",
        subtitle = "MAFFT + FastTree (LG); node labels = local support ≥ 0.7; rooted on ZmFd7 (mitochondrial adrenodoxin)")
-ggsave(file.path(RES, "ferredoxin_tree.png"), width = 12, height = 13, dpi = 150)
+ggsave(file.path(RES, "ferredoxin_tree.png"), width = 12, height = 18, dpi = 150)
 ```
 
 ## 4. Loci in gene orientation
@@ -645,8 +645,8 @@ annotation_map <- function(pr) {
            R_s = ifelse(strand == "+", TO - lr + 1L, from), R_e = ifelse(strand == "+", TO, from + lr - 1L)) %>% ungroup() %>%
     mutate(id = sprintf("p%02d", row_number()),
            tag = case_when(hit_at == "own locus" ~ "", hit_at == "alt haplotype" ~ "  alt", TRUE ~ sprintf("  %s", tolower(hit_at))),
-           panel = sprintf("%s %s:%s%s  [%s bp, %d mm]", taxon_prefix(genome), seq, format(from, big.mark = ","), tag,
-                           format(amp_bp, big.mark = ","), F_mm + R_mm),
+           panel = sprintf("%s %s:%s%s  [%s bp, %d mm]", taxon_prefix(genome), seq, format(from, big.mark = ",", trim = TRUE), tag,
+                           format(amp_bp, big.mark = ",", trim = TRUE), F_mm + R_mm),
            panel = factor(panel, levels = rev(unique(panel))))
   tl  <- function(g, i) if (pan$strand[i] == "+") as.integer(g - pan$win_start[i] + 1L) else as.integer(pan$win_end[i] - g + 1L)
   seg <- function(a, b, i) sort(c(tl(a, i), tl(b, i)))
