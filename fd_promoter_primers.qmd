@@ -69,6 +69,11 @@ UP <- 6000L; DOWN <- 1000L                 # locus = ATG - UP .. CDS end + DOWN,
 PRODUCT_MAX <- 3000L                       # hard cap, every accession
 P3_RANGE <- c(1500L, PRODUCT_MAX)          # Primer3 range on the B73 template; the cap is re-checked per accession
 N_PAIRS <- 3L; MIN_SEP <- 50L
+# one % identity colour scale for every figure and both genes: blue, darker = more similar; <= 85 % shown as 85
+ID_LIM <- c(85, 100)
+id_scale <- function(aes = "colour", name = "% identity\nto B73")
+  continuous_scale(aes, palette = scales::pal_seq_gradient("#56B1F7", "#132B43"), limits = ID_LIM, oob = scales::squish,
+                   breaks = seq(85, 100, 5), labels = c("≤85", "90", "95", "100"), name = name)
 
 sh  <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = TRUE)
 out <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = FALSE)
@@ -623,7 +628,7 @@ amp_plot <- function(pr) {
     annotate("rect", xmin = c(1, L - lr + 1), xmax = c(lf, L), ymin = -Inf, ymax = Inf, fill = "grey85") +
     geom_segment(aes(x = sstart, xend = send, yend = factor(track, levels = rev(lev)), colour = pident), linewidth = 4.5) +
     geom_text(data = sizes, aes(x = L * 1.02, label = sprintf("%s bp", format(bp, big.mark = ","))), hjust = 0, size = 3) +
-    scale_colour_gradient(low = "#56B1F7", high = "#132B43", limits = c(85, 100), oob = scales::squish, name = "% identity\nto B73") +   # darker = more similar
+    id_scale("colour") +
     scale_x_continuous(limits = c(1, L * 1.14), labels = scales::comma) +
     labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq), x = "position in the B73 product (bp)", y = NULL,
          subtitle = sprintf("%d products in %d genomes; grey = primer sites", nrow(e), n_distinct(e$genome))) +
@@ -688,7 +693,7 @@ draw_gene <- function(g) {
     geom_feat(data = feats(ft), aes(colour = feat_type), linewidth = 4, position = "identity") +
     geom_feat(data = feats(prim), aes(colour = feat_type), linewidth = 6, position = "identity") +
     scale_colour_manual(values = c(exon = "#DAA520", CDS = "#8B6914", "forward primer" = "#1F6FB4", "reverse primer" = "#B4451F"), name = NULL) +
-    scale_fill_gradient(low = "#56B1F7", high = "#132B43", name = "% identity") +   # darker = more similar
+    id_scale("fill", name = "% identity") +
     labs(title = sprintf("%s locus, ATG at %d (gene orientation)", g, UP + 1L),
          subtitle = if (nrow(fp)) sprintf("%s: %s / %s", fp$name, fp$F_seq, fp$R_seq) else "no pair passed") +
     theme(legend.position = "bottom")
