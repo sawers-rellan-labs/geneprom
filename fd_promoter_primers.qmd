@@ -623,7 +623,7 @@ amp_plot <- function(pr) {
     annotate("rect", xmin = c(1, L - lr + 1), xmax = c(lf, L), ymin = -Inf, ymax = Inf, fill = "grey85") +
     geom_segment(aes(x = sstart, xend = send, yend = factor(track, levels = rev(lev)), colour = pident), linewidth = 4.5) +
     geom_text(data = sizes, aes(x = L * 1.02, label = sprintf("%s bp", format(bp, big.mark = ","))), hjust = 0, size = 3) +
-    scale_colour_viridis_c(option = "C", limits = c(85, 100), oob = scales::squish, name = "% identity\nto B73") +
+    scale_colour_gradient(low = "#56B1F7", high = "#132B43", limits = c(85, 100), oob = scales::squish, name = "% identity\nto B73") +   # darker = more similar
     scale_x_continuous(limits = c(1, L * 1.14), labels = scales::comma) +
     labs(title = sprintf("%s: %s / %s", pr$name, pr$F_seq, pr$R_seq), x = "position in the B73 product (bp)", y = NULL,
          subtitle = sprintf("%d products in %d genomes; grey = primer sites", nrow(e), n_distinct(e$genome))) +
@@ -688,7 +688,7 @@ draw_gene <- function(g) {
     geom_feat(data = feats(ft), aes(colour = feat_type), linewidth = 4, position = "identity") +
     geom_feat(data = feats(prim), aes(colour = feat_type), linewidth = 6, position = "identity") +
     scale_colour_manual(values = c(exon = "#DAA520", CDS = "#8B6914", "forward primer" = "#1F6FB4", "reverse primer" = "#B4451F"), name = NULL) +
-    scale_fill_viridis_c(name = "% identity", option = "C") +
+    scale_fill_gradient(low = "#56B1F7", high = "#132B43", name = "% identity") +   # darker = more similar
     labs(title = sprintf("%s locus, ATG at %d (gene orientation)", g, UP + 1L),
          subtitle = if (nrow(fp)) sprintf("%s: %s / %s", fp$name, fp$F_seq, fp$R_seq) else "no pair passed") +
     theme(legend.position = "bottom")
