@@ -6,7 +6,7 @@
   "description": "B73 stub",
   "number-of-letters": 805854,
   "number-of-sequences": 2,
-  "last-updated": "2026-10-05T11:13:00",
+  "last-updated": "2026-10-05T11:30:00",
   "number-of-volumes": 1,
   "bytes-total": 398396,
   "bytes-to-cache": 201582,

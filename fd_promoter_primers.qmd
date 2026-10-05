@@ -76,19 +76,25 @@ cat(sprintf("mode = %s | %d accessions | reference dir %s\n", MODE, nrow(ACC), R
 ## 1. Inputs
 
 The reference data are an **assumed starting point** (see README, "Inputs"): for every accession in
-`r REF`, a plain-FASTA genome with its nucleotide BLAST DB (`-parse_seqids`) and its gene annotation.
-Preparing them (download, decompression, indexing) is done once outside this notebook. Only the
-samtools `.fai` indexes are written here, to `work/`, so nothing is ever written to `r REF`.
+`r REF`, a plain-FASTA genome with its nucleotide BLAST DB, its gene annotation, and its proteome
+with a samtools index and a protein BLAST DB (all DBs `-parse_seqids`). Preparing them (download,
+decompression, indexing) is done once outside this notebook. Only the genome `.fai` indexes are
+written here, to `work/`; nothing is ever written to `r REF`.
 
 ```{r genomes}
 ACC <- ACC %>% mutate(
-  fa  = file.path(REF, genome),
-  fai = file.path(WORK, "fai", paste0(accession, ".fa.fai")),
-  gff = file.path(REF, gff),
-  db  = sub("\\.fa$", "", fa))
-has_db <- function(p) any(file.exists(paste0(p, c(".nsq", ".nal", ".00.nsq"))))
-no_db <- ACC$db[!map_lgl(ACC$db, has_db)]
-missing_in <- c(ACC$fa[!file.exists(ACC$fa)], ACC$gff[!file.exists(ACC$gff)], if (length(no_db)) paste(no_db, "(BLAST DB)"))
+  fa   = file.path(REF, genome),
+  fai  = file.path(WORK, "fai", paste0(accession, ".fa.fai")),
+  gff  = file.path(REF, gff),
+  db   = sub("\\.fa$", "", fa),
+  prot = file.path(REF, protein),
+  pdb  = sub("\\.fa$", "", prot))
+has_db <- function(p, k = "n") any(file.exists(paste0(p, sprintf(c(".%ssq", ".%sal", ".00.%ssq"), k))))
+no_db  <- ACC$db[!map_lgl(ACC$db, has_db)]
+no_pdb <- ACC$pdb[!map_lgl(ACC$pdb, has_db, k = "p")]
+files  <- c(ACC$fa, ACC$gff, ACC$prot, paste0(ACC$prot, ".fai"))
+missing_in <- c(files[!file.exists(files)], if (length(no_db)) paste(no_db, "(nucleotide BLAST DB)"),
+                if (length(no_pdb)) paste(no_pdb, "(protein BLAST DB)"))
 if (length(missing_in)) stop("missing inputs (prepare them first, see README):\n", paste(missing_in, collapse = "\n"))
 for (i in seq_len(nrow(ACC))) with(ACC[i, ], if (!file.exists(fai)) sh(sprintf("samtools faidx --fai-idx %s %s", shQuote(fai), shQuote(fa))))
 
@@ -98,6 +104,20 @@ grab <- function(acc, chr, s, e, rc = FALSE) {
   d <- DNAString(toupper(paste(o[-1], collapse = "")))
   if (rc) reverseComplement(d) else d
 }
+get_prot <- function(acc, ids) {                            # proteins by ID from the indexed proteome
+  tf <- tempfile(fileext = ".faa")
+  writeLines(out(sprintf("samtools faidx %s %s", shQuote(ACC$prot[ACC$accession == acc]), paste(shQuote(ids), collapse = " "))), tf)
+  x <- readAAStringSet(tf); names(x) <- sub(" .*", "", names(x)); x
+}
+prot_ids <- function(acc) read_tsv(paste0(ACC$prot[ACC$accession == acc], ".fai"), col_names = "id",
+                                   col_types = cols_only(id = "c"), show_col_types = FALSE)$id
+gene_of <- function(pid) sub("(_P\\d+|\\.\\d+)$", "", pid)                 # Zx..._P001 -> Zx...; Helixer x.1 -> x
+tx_of   <- function(pid) ifelse(grepl("_P\\d+$", pid), sub("_P(\\d+)$", "_T\\1", pid), pid)
+pid_of  <- function(tx)  ifelse(grepl("_T\\d+$", tx), sub("_T(\\d+)$", "_P\\1", tx), tx)   # Helixer: protein ID = transcript ID
+# canonical transcript of each gene: canonical_transcript=1 (MaizeGDB / PanAnd); Helixer has one transcript per gene
+canonical <- function(gm) gm %>% filter(type == "mRNA") %>%
+  arrange(Parent, desc(grepl("canonical_transcript=1", attr)), ID) %>% distinct(Parent, .keep_all = TRUE) %>%
+  transmute(gene_id = Parent, tx = ID, pid = pid_of(ID))
 gff_cols <- c("seqid","src","type","start","end","score","strand","phase","attr")
 read_gff <- function(gff, filter_awk) {
   cat_cmd <- if (grepl("\\.gz$", gff)) "gzip -dc" else "cat"
@@ -106,161 +126,167 @@ read_gff <- function(gff, filter_awk) {
   read_tsv(I(txt), col_names = gff_cols, col_types = "ccciicccc") %>%
     mutate(ID = str_match(attr, "(?:^|;)ID=([^;]+)")[, 2], Parent = str_match(attr, "Parent=([^;]+)")[, 2])
 }
-knitr::kable(ACC %>% transmute(accession, taxon, annotation, blast_db = basename(db)))
+knitr::kable(ACC %>% transmute(accession, taxon, annotation, genome_db = basename(db), proteome = basename(prot)))
 ```
 
-## 2. B73 query: the CDS of each gene
+## 2. B73 queries
 
-```{r b73-cds}
+The B73 protein of each gene (from the B73 proteome) drives the ortholog search; its CDS is used
+only to find copies that have no gene model.
+
+```{r b73-queries}
 b73 <- ACC %>% filter(accession == "B73")
-b73_models <- map_dfr(GENES$b73_id, function(id)
-  read_gff(b73$gff, sprintf("$9 ~ /%s/", id)) %>% mutate(b73_id = id))
+b73_models <- read_gff(b73$gff, sprintf("$9 ~ /(%s)/", paste(GENES$b73_id, collapse = "|")))
+GENES$b73_pid <- canonical(b73_models)$pid[match(GENES$b73_id, canonical(b73_models)$gene_id)]
+qp <- get_prot("B73", GENES$b73_pid); names(qp) <- GENES$gene
+qpfa <- file.path(WORK, "query_proteins.faa"); writeXStringSet(qp, qpfa)
+
 cds_q <- GENES %>% rowwise() %>% mutate(seq = {
-  cds <- b73_models %>% filter(b73_id == .env$b73_id, type == "CDS", grepl("_T001", Parent))
+  cds <- b73_models %>% filter(type == "CDS", Parent == tx_of(b73_pid))
   rc <- cds$strand[1] == "-"
   cds <- if (rc) arrange(cds, desc(start)) else arrange(cds, start)
   as.character(do.call(xscat, map(seq_len(nrow(cds)), ~ grab("B73", cds$seqid[.x], cds$start[.x], cds$end[.x], rc))))
 }) %>% ungroup()
 qfa <- file.path(WORK, "cds_queries.fa")
 writeLines(paste0(">", cds_q$gene, "\n", cds_q$seq), qfa)
-knitr::kable(cds_q %>% transmute(gene, b73_id, cds_bp = nchar(seq),
-                                 start = substr(seq, 1, 3), end = substring(seq, nchar(seq) - 2)))
+knitr::kable(GENES %>% transmute(gene, b73_id, aa = Biostrings::width(qp)[match(gene, names(qp))], cds_bp = nchar(cds_q$seq)),
+             caption = "Queries: canonical-transcript protein and CDS of each B73 gene.")
 ```
 
-## 3. Orthologs: reciprocal best hits, one locus per haplotype
+## 3. Orthologs: protein reciprocal best hits, one locus per haplotype
 
-1. `blastn` of both B73 CDSs against every genome; candidates are hits covering ≥ 90 % of the CDS.
-2. **Reciprocal best hit (RBH):** each candidate region is searched back against **all B73 genes**;
-   it is kept only if its best hit is the B73 gene it came from. This rejects any paralog — the other
-   ferredoxin (Fd4 and Fd9 CDSs are ~85 % identical) or more distant copies.
-3. **Primary haplotype** = the best RBH candidate on the B73-matching chromosome (chr2 for ZmFd4,
-   chr10 for ZmFd9); failing that, on any `chr*`. Wild accessions such as TIL01, Gigi, Momo and
-   PI615697 also carry their second haplotype as `alt-*` scaffolds: the best RBH candidate there is
-   kept as the **alt haplotype** (`<accession>_alt`), and primers must bind it too.
-4. The gene model overlapping each hit gives the ortholog ID and exon structure.
+Standard protein-level orthology (as in OrthoMCL / OrthoFinder / GENESPACE, reduced to two genes):
+
+1. **Annotated candidates:** `blastp` of the B73 Fd4 and Fd9 proteins against each proteome; every
+   gene with a hit covering ≥ 40 % of the query is a candidate (its best-scoring isoform).
+2. **Unannotated candidates:** genome `blastn` of the B73 CDSs; a hit that overlaps no gene model is
+   translated (extended to the query CDS length) and added. These copies — typically on `alt-*`
+   scaffolds — are absent from every proteome.
+3. **Reciprocal best hit:** every candidate protein is searched back against the **whole B73
+   proteome**; it is an ortholog of ZmFd4 / ZmFd9 only if its best hit is that gene.
+4. **Locus per haplotype:** primary = best RBH copy on the B73-matching chromosome, else on any
+   other `chr*`, else the best anywhere, flagged **unplaced**. The best remaining RBH copy off the
+   primary chromosomes is that accession's second haplotype (`<accession>_alt`), which primers must
+   bind too. The full gene tree (§3b) shows every candidate so each call can be judged.
 
 ```{r orthologs}
-bl_cols <- c("qseqid","sseqid","pident","length","qstart","qend","sstart","send","evalue","bitscore","qlen")
-blast_tbl <- function(cmd) { o <- out(cmd); if (!length(o)) return(NULL)
-  read_tsv(I(o), col_names = bl_cols, show_col_types = FALSE) }
-hits <- map_dfr(seq_len(nrow(ACC)), function(i)
-  blast_tbl(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 20 -num_threads %d -outfmt '6 %s'",
-                    shQuote(qfa), shQuote(ACC$db[i]), THREADS, paste(bl_cols, collapse = " "))) %>%
-    mutate(genome = ACC$accession[i])) %>%
-  mutate(strand = ifelse(send >= sstart, "+", "-"), lo = pmin(sstart, send), hi = pmax(sstart, send), qcov = length / qlen)
+bl6 <- function(cmd, cols) { o <- out(cmd); if (!length(o)) return(NULL)
+  read_tsv(I(o), col_names = cols, show_col_types = FALSE, col_types = cols(.default = "c")) %>% type_convert(guess_integer = TRUE) }
+bp_cols <- c("qseqid","sseqid","pident","length","qstart","qend","sstart","send","evalue","bitscore","qlen","slen")
+blastp <- function(q, db, n = 100) bl6(sprintf("blastp -query %s -db %s -evalue 1e-10 -max_target_seqs %d -num_threads %d -outfmt '6 %s'",
+                                               shQuote(q), shQuote(db), n, THREADS, paste(bp_cols, collapse = " ")), bp_cols)
 
-# B73 gene set (genomic span of every gene) as the RBH target
-b73_db <- file.path(WORK, "blastdb", "b73_genes")
-if (!has_db(b73_db)) {
-  gg <- read_gff(b73$gff, '$3=="gene"')
-  reg <- file.path(WORK, "b73_genes.regions"); ids <- file.path(WORK, "b73_genes.ids"); gfa <- file.path(WORK, "b73_genes.fa")
-  writeLines(sprintf("%s:%d-%d", gg$seqid, gg$start, gg$end), reg); writeLines(gg$ID, ids)
-  sh(sprintf("samtools faidx --fai-idx %s %s -r %s | awk 'NR==FNR{id[NR]=$1; next} /^>/{n++; print \">\" id[n]; next} {print}' %s - > %s",
-             shQuote(b73$fai), shQuote(b73$fa), shQuote(reg), shQuote(ids), shQuote(gfa)))
-  sh(sprintf("makeblastdb -dbtype nucl -in %s -out %s", shQuote(gfa), shQuote(b73_db)))
-}
-ocand <- hits %>% filter(qcov >= 0.9) %>% mutate(cid = sprintf("c%d", row_number()))
-cfa <- file.path(WORK, "rbh_candidates.fa")
-writeXStringSet(DNAStringSet(setNames(map(seq_len(nrow(ocand)), ~ grab(ocand$genome[.x], ocand$sseqid[.x], ocand$lo[.x], ocand$hi[.x])), ocand$cid)), cfa)
-back <- blast_tbl(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 5 -num_threads %d -outfmt '6 %s'",
-                          shQuote(cfa), shQuote(b73_db), THREADS, paste(bl_cols, collapse = " "))) %>%
-  group_by(qseqid) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup() %>%
-  transmute(cid = qseqid, back_best = sseqid)
-ocand <- ocand %>% left_join(back, by = "cid") %>% left_join(GENES %>% rename(qseqid = gene), by = "qseqid") %>%
-  mutate(rbh = !is.na(back_best) & back_best == b73_id, alt = grepl("^alt", sseqid))
-b73_chr <- ocand %>% filter(genome == "B73", rbh) %>% group_by(qseqid) %>% slice_max(bitscore, n = 1) %>% select(qseqid, b73_chr = sseqid)
-ocand <- ocand %>% left_join(b73_chr, by = "qseqid")
-
-pick_locus <- function(d, hap) {
-  b <- if (hap == "primary") {
-    d1 <- d %>% filter(rbh, !alt, sseqid == b73_chr)
-    if (!nrow(d1)) d1 <- d %>% filter(rbh, !alt, grepl("^chr", sseqid))
-    d1
-  } else d %>% filter(rbh, alt)
-  b <- b %>% arrange(desc(bitscore)) %>% slice(1)
-  if (!nrow(b)) return(NULL)
-  tibble(genome = b$genome, gene = b$qseqid, hap = hap, accession = ifelse(hap == "alt", paste0(b$genome, "_alt"), b$genome),
-         chr = b$sseqid, strand = b$strand, pident = b$pident, bits = b$bitscore,
-         atg = if (b$strand == "+") b$sstart - (b$qstart - 1L) else b$sstart + (b$qstart - 1L),
-         cds_end = if (b$strand == "+") b$send + (b$qlen - b$qend) else b$send - (b$qlen - b$qend))
-}
-orth <- ocand %>% group_split(genome, qseqid) %>% map_dfr(~ bind_rows(pick_locus(.x, "primary"), pick_locus(.x, "alt")))
-rbh_tbl <- ocand %>% group_by(genome, gene = qseqid) %>%
-  summarise(candidates = n(), rbh_pass = sum(rbh), rejected_as = paste(unique(back_best[!rbh]), collapse = ","), .groups = "drop")
-
-# gene model overlapping each hit
-models <- map_dfr(seq_len(nrow(orth)), function(k) {
-  o <- orth[k, ]; g <- ACC$gff[ACC$accession == o$genome]
-  lo <- min(o$atg, o$cds_end); hi <- max(o$atg, o$cds_end)
-  gm <- read_gff(g, sprintf("$1==\"%s\" && $5>=%d && $4<=%d", o$chr, lo - 20000L, hi + 20000L))
+# 1. annotated candidates: genes hit through any isoform, represented by their canonical-transcript protein
+fwd <- map_dfr(ACC$accession, function(a) blastp(qpfa, ACC$pdb[ACC$accession == a]) %>% mutate(genome = a)) %>%
+  mutate(sseqid = sub("^lcl\\|", "", sseqid), qcov = (qend - qstart + 1) / qlen, gene_id = gene_of(sseqid)) %>%
+  filter(qcov >= 0.4) %>% group_by(genome, gene_id) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup()
+ann <- map_dfr(unique(fwd$genome), function(a) {
+  f <- fwd %>% filter(genome == a)
+  gm <- read_gff(ACC$gff[ACC$accession == a], sprintf("$9 ~ /(%s)/", paste(unique(f$gene_id), collapse = "|")))
   if (is.null(gm)) return(NULL)
-  gmod <- gm %>% filter(type == "gene", end >= lo, start <= hi, strand == o$strand) %>% slice(1)
-  if (!nrow(gmod)) return(NULL)
-  tx <- gm %>% filter(type == "mRNA", Parent == gmod$ID) %>%
-    arrange(desc(grepl("canonical_transcript=1", attr))) %>% slice(1)
-  gm %>% filter(Parent == tx$ID, type %in% c("exon", "CDS", "five_prime_UTR", "three_prime_UTR")) %>%
-    mutate(accession = o$accession, gene = o$gene, model_id = gmod$ID)
+  cn <- canonical(gm) %>% filter(gene_id %in% f$gene_id)
+  gm %>% filter(Parent %in% cn$tx) %>% mutate(genome = a, tx = Parent) %>% left_join(cn %>% select(tx, gene_id, pid), by = "tx")
 })
-orth <- orth %>% left_join(models %>% distinct(accession, gene, model_id), by = c("accession", "gene")) %>%
-  arrange(gene, genome, desc(hap == "primary"))
-write_tsv(orth, file.path(RES, "orthologs.tsv"))
-knitr::kable(orth %>% transmute(gene, accession, hap, model_id, locus = sprintf("%s:%s (%s)", chr, format(atg, big.mark = ","), strand), pident, bits),
-             caption = "Ortholog loci (ATG position from the CDS hit). Every row passed the reciprocal best hit test.")
-knitr::kable(rbh_tbl, caption = "Candidates per genome and gene; rejected_as = the B73 gene a rejected candidate maps back to.")
-```
+ann_loc <- ann %>% filter(type == "CDS") %>% group_by(genome, tx) %>%
+  summarise(chr = seqid[1], strand = strand[1], lo = min(start), hi = max(end), .groups = "drop") %>%
+  mutate(atg = ifelse(strand == "+", lo, hi), cds_end = ifelse(strand == "+", hi, lo))
+ann_loc <- ann_loc %>% left_join(ann %>% distinct(genome, tx, gene_id, pid), by = c("genome", "tx"))
+cand_ann <- fwd %>% select(-sseqid) %>% inner_join(ann_loc, by = c("genome", "gene_id")) %>%
+  transmute(genome, cand = pid, model_id = gene_id, tx, query = qseqid, qcov, fwd_pident = pident,
+            chr, strand, lo, hi, atg, cds_end, source = "annotated")
 
-## 3b. Gene tree of every hit
-
-Every locus hit by either CDS query (≥ 40 % of the CDS, so partial copies are included) in every
-genome, translated, aligned (MAFFT) and placed in an approximate-ML tree (FastTree, LG) together with
-the eleven B73 ferredoxins named in Jia *et al.* 2025 (Supplementary Table 1; NCBI proteins mapped to
-B73 v5 genes by `tblastn`, `config/zm_ferredoxins.tsv`). Proteins come from the annotated CDS when a
-gene model overlaps the hit, otherwise from the hit extended to the full query CDS length. Rooted on
-ZmFd7 (mitochondrial adrenodoxin).
-
-```{r gene-tree, fig.height=11}
-FD <- read_tsv("config/zm_ferredoxins.tsv", show_col_types = FALSE)
-gff_cds_seq <- function(genome_acc, gff_rows) {           # spliced CDS of the canonical transcript
-  tx <- gff_rows %>% filter(type == "mRNA") %>% arrange(desc(grepl("canonical_transcript=1", attr))) %>% slice(1)
-  cds <- gff_rows %>% filter(type == "CDS", Parent == tx$ID)
-  if (!nrow(cds)) return(NULL)
-  rc <- cds$strand[1] == "-"; cds <- if (rc) arrange(cds, desc(start)) else arrange(cds, start)
-  do.call(xscat, map(seq_len(nrow(cds)), ~ grab(genome_acc, cds$seqid[.x], cds$start[.x], cds$end[.x], rc)))
-}
-to_prot <- function(d) { d <- subseq(d, 1, length(d) - length(d) %% 3)
-  p <- as.character(translate(d, if.fuzzy.codon = "solve")); p <- sub("\\*$", "", p); gsub("\\*", "X", p) }
-
-# B73 family members (by name)
-fd_rows <- read_gff(b73$gff, sprintf("$9 ~ /(%s)/", paste(FD$b73_id, collapse = "|")))
-fd_prot <- map_dfr(seq_len(nrow(FD)), function(k) {
-  r <- fd_rows %>% filter(str_detect(attr, FD$b73_id[k]))
-  d <- if (nrow(r)) gff_cds_seq("B73", r) else NULL
-  if (is.null(d)) return(NULL)
-  tibble(tip = sprintf("%s (%s)", FD$short_name[k], FD$b73_id[k]), genome = "B73", group = "B73 ferredoxin", prot = to_prot(d))
-})
-
-# teosinte loci: merge overlapping hits of the two queries, keep the best one per locus
-tl <- hits %>% filter(genome != "B73", qcov >= 0.4) %>% arrange(genome, sseqid, lo) %>%
-  group_by(genome, sseqid) %>% mutate(locus = cumsum(lo > lag(cummax(hi), default = -Inf) + 100)) %>%
-  group_by(genome, sseqid, locus) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup() %>%
-  left_join(ocand %>% select(genome, sseqid, lo, hi, qseqid, rbh, back_best), by = c("genome", "sseqid", "lo", "hi", "qseqid"))
-tl_prot <- map_dfr(seq_len(nrow(tl)), function(k) {
-  h <- tl[k, ]; g <- ACC$gff[ACC$accession == h$genome]
+# 2. unannotated candidates from the genome
+bl_cols <- c("qseqid","sseqid","pident","length","qstart","qend","sstart","send","evalue","bitscore","qlen")
+hits <- map_dfr(seq_len(nrow(ACC)), function(i)
+  bl6(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 20 -num_threads %d -outfmt '6 %s'",
+              shQuote(qfa), shQuote(ACC$db[i]), THREADS, paste(bl_cols, collapse = " ")), bl_cols) %>% mutate(genome = ACC$accession[i])) %>%
+  mutate(strand = ifelse(send >= sstart, "+", "-"), lo = pmin(sstart, send), hi = pmax(sstart, send), qcov = length / qlen) %>%
+  filter(qcov >= 0.4)
+gloci <- hits %>% arrange(genome, sseqid, lo) %>% group_by(genome, sseqid) %>%
+  mutate(locus = cumsum(lo > lag(cummax(as.numeric(hi)), default = -Inf) + 100)) %>%
+  group_by(genome, sseqid, locus) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup()
+cand_un <- map_dfr(seq_len(nrow(gloci)), function(k) {
+  h <- gloci[k, ]
+  if (nrow(cand_ann %>% filter(genome == h$genome, chr == h$sseqid, lo <= h$hi, hi >= h$lo))) return(NULL)
+  gm <- read_gff(ACC$gff[ACC$accession == h$genome], sprintf("$1==\"%s\" && $3==\"gene\" && $5>=%d && $4<=%d", h$sseqid, h$lo, h$hi))
+  if (!is.null(gm) && nrow(gm)) return(NULL)                # annotated gene here: covered by the proteome search
   atg <- if (h$strand == "+") h$sstart - (h$qstart - 1L) else h$sstart + (h$qstart - 1L)
   cend <- if (h$strand == "+") h$send + (h$qlen - h$qend) else h$send - (h$qlen - h$qend)
-  gm <- read_gff(g, sprintf("$1==\"%s\" && $5>=%d && $4<=%d", h$sseqid, h$lo, h$hi))
-  gmod <- if (is.null(gm)) NULL else gm %>% filter(type == "gene", strand == h$strand) %>% slice(1)
-  d <- NULL; src <- "hit"
-  if (!is.null(gmod) && nrow(gmod)) {
-    d <- gff_cds_seq(h$genome, read_gff(g, sprintf("$1==\"%s\" && $9 ~ /%s/", h$sseqid, gmod$ID))); src <- gmod$ID }
-  if (is.null(d)) d <- grab(h$genome, h$sseqid, min(atg, cend), max(atg, cend), h$strand == "-")
-  role <- orth %>% filter(genome == h$genome, chr == h$sseqid, pmin(atg, cds_end) <= h$hi, pmax(atg, cds_end) >= h$lo)
-  role <- if (nrow(role)) sprintf("%s ortholog (%s)", sub("Zm", "", role$gene[1]), role$hap[1]) else
-          if (isTRUE(h$rbh)) "RBH, not chosen" else sprintf("maps back to %s", h$back_best)
-  tibble(tip = sprintf("%s %s:%.2f Mb %s [%s]", h$genome, h$sseqid, h$lo / 1e6, ifelse(src == "hit", "unannotated", src), role),
-         genome = h$genome, group = ifelse(grepl("ortholog", role), sub(" \\(.*", "", role), "other hit"), prot = to_prot(d))
+  tibble(genome = h$genome, cand = sprintf("%s:%s:%d", h$genome, h$sseqid, h$lo), model_id = NA_character_, tx = NA_character_,
+         query = h$qseqid, qcov = h$qcov, fwd_pident = h$pident, chr = h$sseqid, strand = h$strand,
+         lo = min(atg, cend), hi = max(atg, cend), atg = atg, cds_end = cend, source = "unannotated")
 })
-tp <- bind_rows(fd_prot, tl_prot) %>% filter(nchar(prot) >= 50)
+to_prot <- function(d) { d <- subseq(d, 1, length(d) - length(d) %% 3)
+  p <- as.character(translate(d, if.fuzzy.codon = "solve")); p <- sub("\\*$", "", p); gsub("\\*", "X", p) }
+cands <- bind_rows(cand_ann, cand_un) %>% mutate(cid = sprintf("c%03d", row_number()))
+cands$prot <- map_chr(seq_len(nrow(cands)), function(k) {
+  x <- cands[k, ]
+  if (x$source == "annotated") sub("\\*$", "", as.character(get_prot(x$genome, x$cand)[[1]]))
+  else to_prot(grab(x$genome, x$chr, x$lo, x$hi, x$strand == "-"))
+})
+
+# 3. reciprocal best hit against the whole B73 proteome
+cfa <- file.path(WORK, "rbh_candidates.faa")
+writeXStringSet(AAStringSet(setNames(cands$prot, cands$cid)), cfa)
+back <- blastp(cfa, b73$pdb, n = 10) %>% mutate(sgene = gene_of(sub("^lcl\\|", "", sseqid)))
+cands <- cands %>%
+  left_join(back %>% group_by(qseqid) %>% slice_max(bitscore, n = 1, with_ties = FALSE) %>% ungroup() %>%
+              transmute(cid = qseqid, back_best = sgene, back_bits = bitscore), by = "cid") %>%
+  mutate(ortholog_of = GENES$gene[match(back_best, GENES$b73_id)])
+own <- back %>% inner_join(GENES %>% select(gene, b73_id), by = c("sgene" = "b73_id")) %>% group_by(qseqid, gene) %>%
+  summarise(own_bits = max(bitscore), .groups = "drop")
+cands <- cands %>% left_join(own %>% rename(cid = qseqid, ortholog_of = gene), by = c("cid", "ortholog_of"))
+
+# 4. one locus per haplotype
+b73_chr <- cands %>% filter(genome == "B73", !is.na(ortholog_of), model_id == GENES$b73_id[match(ortholog_of, GENES$gene)]) %>%
+  distinct(ortholog_of, b73_chr = chr)
+cands <- cands %>% left_join(b73_chr, by = "ortholog_of") %>%
+  mutate(placement = case_when(chr == b73_chr ~ "chr", grepl("^chr", chr) ~ "chr (other)", TRUE ~ "unplaced"))
+orth <- cands %>% filter(!is.na(ortholog_of), qcov >= 0.7) %>% group_split(genome, ortholog_of) %>% map_dfr(function(d) {
+  d <- d %>% arrange(match(placement, c("chr", "chr (other)", "unplaced")), desc(own_bits))
+  p <- d[1, ] %>% mutate(hap = "primary", accession = genome)
+  rest <- d[-1, ] %>% filter(placement == "unplaced") %>% slice_max(own_bits, n = 1, with_ties = FALSE)
+  bind_rows(p, rest %>% mutate(hap = "alt", accession = paste0(genome, "_alt")))
+}) %>% transmute(genome, gene = ortholog_of, hap, accession, placement, source, model_id, tx, cand, chr, strand, atg, cds_end,
+                 fwd_pident, own_bits)
+models <- ann %>% inner_join(orth %>% filter(!is.na(tx)) %>% select(genome, tx, accession, gene, model_id), by = c("genome", "tx")) %>%
+  filter(type %in% c("exon", "CDS", "five_prime_UTR", "three_prime_UTR"))
+write_tsv(orth %>% select(-cand), file.path(RES, "orthologs.tsv"))
+write_tsv(cands %>% select(-prot), file.path(RES, "ortholog_candidates.tsv"))
+knitr::kable(orth %>% transmute(gene, accession, hap, placement, source, model_id,
+                                locus = sprintf("%s:%s (%s)", chr, format(atg, big.mark = ","), strand), own_bits),
+             caption = "Ortholog loci (ATG = first CDS base). Every row passed the protein reciprocal best hit test; 'unplaced' = no copy on a chr* sequence.")
+knitr::kable(cands %>% count(genome, source, rbh = ifelse(is.na(ortholog_of), "no", ortholog_of)) %>%
+               pivot_wider(names_from = rbh, values_from = n, values_fill = 0),
+             caption = "Candidates per genome: RBH to ZmFd4 / ZmFd9, or 'no' (best back-hit is another B73 gene).")
+```
+
+## 3b. Gene tree of every candidate
+
+Every candidate from §3 (annotated proteins from the proteomes, unannotated copies translated from
+the genome), with the eleven B73 ferredoxins named in Jia *et al.* 2025 (Supplementary Table 1;
+`config/zm_ferredoxins.tsv`), aligned with MAFFT and placed by FastTree (LG). Rooted on ZmFd7
+(mitochondrial adrenodoxin). Labels give the locus, the gene model (or *unannotated*), and the call:
+ortholog (haplotype, placement), RBH but not chosen, or the B73 gene it maps back to.
+
+```{r gene-tree, fig.height=13}
+FD <- read_tsv("config/zm_ferredoxins.tsv", show_col_types = FALSE)
+fd_cn  <- canonical(read_gff(b73$gff, sprintf("$3==\"mRNA\" && $9 ~ /(%s)/", paste(FD$b73_id, collapse = "|"))) %||% tibble(type = character()))
+fd_pid <- fd_cn$pid[match(FD$b73_id, fd_cn$gene_id)]
+fd_prot <- if (any(!is.na(fd_pid))) get_prot("B73", fd_pid[!is.na(fd_pid)]) else AAStringSet()
+fd_tips <- tibble(tip = sprintf("%s (%s)", FD$short_name, FD$b73_id)[!is.na(fd_pid)], group = "B73 ferredoxin", b73 = TRUE,
+                  prot = sub("\\*$", "", as.character(fd_prot)))
+name_of <- function(g) ifelse(g %in% FD$b73_id, FD$short_name[match(g, FD$b73_id)], g)
+cand_tips <- cands %>% filter(!(genome == "B73" & model_id %in% FD$b73_id)) %>%
+  left_join(orth %>% select(genome, cand, hap), by = c("genome", "cand")) %>%
+  mutate(call = case_when(!is.na(hap) ~ sprintf("%s ortholog, %s, %s", sub("Zm", "", ortholog_of), hap, placement),
+                          !is.na(ortholog_of) ~ sprintf("RBH %s, not chosen, %s", ortholog_of, placement),
+                          TRUE ~ sprintf("back-hit %s", name_of(back_best))),
+         call = ifelse(qcov < 0.7, paste0(call, ", partial"), call),
+         tip = sprintf("%s %s:%.2f Mb %s [%s]", genome, chr, lo / 1e6, ifelse(is.na(model_id), "unannotated", model_id), call),
+         group = ifelse(!is.na(hap), sprintf("%s ortholog", sub("Zm", "", ortholog_of)), "other candidate"), b73 = genome == "B73") %>%
+  select(tip, group, b73, prot)
+tp <- bind_rows(fd_tips, cand_tips) %>% filter(nchar(prot) >= 50)
 pfa <- file.path(WORK, "tree_proteins.faa"); afa <- file.path(WORK, "tree_proteins.aln.faa"); nwk <- file.path(RES, "ferredoxin_tree.nwk")
 writeXStringSet(AAStringSet(setNames(tp$prot, sprintf("t%03d", seq_len(nrow(tp))))), pfa)
 sh(sprintf("mafft --auto --quiet %s > %s", shQuote(pfa), shQuote(afa)))
@@ -269,16 +295,16 @@ tr <- read.tree(nwk); tr$tip.label <- tp$tip[as.integer(sub("^t", "", tr$tip.lab
 out_tip <- grep("^ZmFd7 ", tr$tip.label, value = TRUE)
 if (length(out_tip)) tr <- root(tr, outgroup = out_tip, resolve.root = TRUE)
 write.tree(tr, nwk)
-grp <- tp %>% transmute(label = tip, group, b73 = genome == "B73")
-ggtree(tr) %<+% grp + geom_tippoint(aes(colour = group), size = 1.6) +
-  geom_tiplab(aes(colour = group, fontface = ifelse(b73, "bold", "plain")), size = 3, offset = 0.01, show.legend = FALSE) +
+ggtree(tr) %<+% (tp %>% transmute(label = tip, group, b73)) + geom_tippoint(aes(colour = group), size = 1.6) +
+  geom_tiplab(aes(colour = group, fontface = ifelse(b73, "bold", "plain")), size = 2.8, offset = 0.01, show.legend = FALSE) +
   geom_nodelab(aes(label = ifelse(!is.na(suppressWarnings(as.numeric(label))) & as.numeric(label) >= 0.7, label, "")),
                size = 2.2, hjust = 1.3, vjust = -0.4, colour = "grey40") +
-  scale_colour_manual(values = c("B73 ferredoxin" = "black", "Fd4 ortholog" = "#1F6FB4", "Fd9 ortholog" = "#B4451F", "other hit" = "grey50"), name = NULL) +
-  xlim(0, max(node.depth.edgelength(tr)) * 2.2) + theme(legend.position = "bottom") +
-  labs(title = "Ferredoxin proteins: B73 family + every Fd4/Fd9 hit in the teosinte genomes",
-       subtitle = "FastTree (LG); node labels = local support ≥ 0.7; rooted on ZmFd7 (mitochondrial adrenodoxin)")
-ggsave(file.path(RES, "ferredoxin_tree.png"), width = 11, height = 11, dpi = 150)
+  scale_colour_manual(values = c("B73 ferredoxin" = "black", "Fd4 ortholog" = "#1F6FB4", "Fd9 ortholog" = "#B4451F",
+                                 "other candidate" = "grey50"), name = NULL) +
+  xlim(0, max(node.depth.edgelength(tr)) * 2.4) + theme(legend.position = "bottom") +
+  labs(title = "Ferredoxin proteins: the 11 named B73 ferredoxins + every ZmFd4 / ZmFd9 candidate in every genome",
+       subtitle = "MAFFT + FastTree (LG); node labels = local support ≥ 0.7; rooted on ZmFd7 (mitochondrial adrenodoxin)")
+ggsave(file.path(RES, "ferredoxin_tree.png"), width = 12, height = 13, dpi = 150)
 ```
 
 ## 4. Loci in gene orientation

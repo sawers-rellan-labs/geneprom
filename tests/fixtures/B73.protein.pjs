@@ -1,0 +1,24 @@
+{
+  "version": "1.2",
+  "dbname": "B73.protein",
+  "dbtype": "Protein",
+  "db-version": 5,
+  "description": "B73 stub proteins",
+  "number-of-letters": 8619,
+  "number-of-sequences": 27,
+  "last-updated": "2026-10-05T11:31:00",
+  "number-of-volumes": 1,
+  "bytes-total": 208543,
+  "bytes-to-cache": 8967,
+  "files": [
+    "B73.protein.pdb",
+    "B73.protein.phr",
+    "B73.protein.pin",
+    "B73.protein.pog",
+    "B73.protein.pos",
+    "B73.protein.pot",
+    "B73.protein.psq",
+    "B73.protein.ptf",
+    "B73.protein.pto"
+  ]
+}

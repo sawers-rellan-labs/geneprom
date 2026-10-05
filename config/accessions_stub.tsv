@@ -1,3 +1,3 @@
-accession	taxon	genome	gff	annotation
-B73	Zea mays ssp. mays (reference)	B73.fa	B73.gff3	MaizeGDB Zm00001eb.1 (stub slice)
-TIL18	Zea mays ssp. mexicana	TIL18.fa	TIL18.gff3	PanAnd Zx00002aa.1 (stub slice)
+accession	taxon	genome	gff	annotation	protein
+B73	Zea mays ssp. mays (reference)	B73.fa	B73.gff3	MaizeGDB Zm00001eb.1 (stub slice)	B73.protein.fa
+TIL18	Zea mays ssp. mexicana	TIL18.fa	TIL18.gff3	PanAnd Zx00002aa.1 (stub slice)	TIL18.protein.fa

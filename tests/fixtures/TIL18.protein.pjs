@@ -1,0 +1,24 @@
+{
+  "version": "1.2",
+  "dbname": "TIL18.protein",
+  "dbtype": "Protein",
+  "db-version": 5,
+  "description": "TIL18 stub proteins",
+  "number-of-letters": 10235,
+  "number-of-sequences": 27,
+  "last-updated": "2026-10-05T11:31:00",
+  "number-of-volumes": 1,
+  "bytes-total": 210167,
+  "bytes-to-cache": 10591,
+  "files": [
+    "TIL18.protein.pdb",
+    "TIL18.protein.phr",
+    "TIL18.protein.pin",
+    "TIL18.protein.pog",
+    "TIL18.protein.pos",
+    "TIL18.protein.pot",
+    "TIL18.protein.psq",
+    "TIL18.protein.ptf",
+    "TIL18.protein.pto"
+  ]
+}
