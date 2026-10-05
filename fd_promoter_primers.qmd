@@ -1,0 +1,466 @@
+---
+title: "ZmFd4 / ZmFd9 promoter primers across PanAnd teosintes"
+subtitle: "Orthologs → loci → alignment → conserved primer sites → Primer3 (2.5–3 kb) → per-accession binding + whole-genome e-PCR"
+author: "thegemmalab@ncsu.edu"
+date: today
+params:
+  mode: stub          # stub = laptop fixtures (B73 + TIL18 slices); full = all genomes on hazel
+format:
+  html:
+    output-file: fd_promoter_primers.html
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    embed-resources: true
+    fig-width: 12
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+**Goal.** Primers that amplify the region upstream of the ATG of the maize ferredoxins **ZmFd4**
+(`Zm00001eb083950`) and **ZmFd9** (`Zm00001eb421930`) in every published PanAnd *Zea* teosinte
+assembly, so the region can be resequenced (cf. Jia *et al.* 2025, who resequenced a 2.9-kb ZmFd4
+fragment and found InDel194, a 604-bp deletion upstream of the ATG).
+
+**Design rules.**
+
+- **Reverse primer** in the **first CDS exon** (in B73 v5 both genes start with a non-coding 5′UTR
+  exon; the ATG is in exon 2, which holds the whole CDS).
+- Primer sites are chosen by **conservation, not coordinates**: a primer must sit on alignment
+  columns that are identical and gap-free in **every** accession (pass 1). Only if pass 1 finds
+  nothing are SNP columns allowed, as IUPAC degenerate bases, with an invariant 3′ 5 nt (pass 2).
+- **Product 2,500–3,000 bp** (Primer3), forward primer upstream of the ATG.
+- **Specificity:** forward e-PCR over each whole genome, as in `primermu`.
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(Biostrings)                       # first, so dplyr/purrr verbs (slice, filter, reduce) win
+  library(gggenomes); library(ggplot2); library(readr); library(dplyr); library(tidyr)
+  library(stringr); library(purrr)
+})
+
+MODE <- params$mode
+stopifnot(MODE %in% c("stub", "full"))
+REF  <- if (MODE == "stub") "tests/fixtures" else "/rsstu/users/r/rrellan/BZea/ref"
+ACC  <- read_tsv(if (MODE == "stub") "config/accessions_stub.tsv" else "config/accessions.tsv",
+                 show_col_types = FALSE)
+WORK <- file.path("work", MODE)
+RES  <- if (MODE == "stub") file.path(WORK, "results") else "results"
+for (d in file.path(WORK, c("", "fai", "blastdb", "genomes", "loci", "aln", "p3", "epcr")))
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+dir.create(RES, showWarnings = FALSE, recursive = TRUE)
+THREADS <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
+
+GENES <- tibble(gene = c("ZmFd4", "ZmFd9"), b73_id = c("Zm00001eb083950", "Zm00001eb421930"))
+UP <- 6000L; DOWN <- 1000L                 # locus = ATG - UP .. CDS end + DOWN, in gene orientation
+PRODUCT <- c(2500L, 3000L)
+
+sh  <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = TRUE)
+out <- function(cmd) system2("bash", c("-c", shQuote(cmd)), stdout = TRUE, stderr = FALSE)
+tools <- c("samtools", "blastn", "makeblastdb", "mafft", "primer3_core", "e-PCR")
+miss <- tools[Sys.which(tools) == ""]
+if (length(miss)) stop("missing tools: ", paste(miss, collapse = ", "))
+cat(sprintf("mode = %s | %d accessions | reference dir %s\n", MODE, nrow(ACC), REF))
+```
+
+## 1. Genomes: plain FASTA, index, BLAST database
+
+Genomes are read in place from `r REF`; only a gzipped genome (RIL003) is decompressed into
+`work/` (e-PCR needs plain FASTA). FASTA indexes and any missing BLAST DB are written to `work/`,
+never next to the shared references.
+
+```{r genomes}
+ACC <- ACC %>% mutate(
+  fa_src = file.path(REF, genome),
+  fa     = ifelse(grepl("\\.gz$", genome), file.path(WORK, "genomes", paste0(accession, ".fa")), fa_src),
+  fai    = file.path(WORK, "fai", paste0(accession, ".fa.fai")),
+  gff    = file.path(REF, gff),
+  db_ref = sub("\\.fa(\\.gz)?$", "", fa_src))
+stopifnot(all(file.exists(ACC$fa_src)))
+
+for (i in seq_len(nrow(ACC))) with(ACC[i, ], {
+  if (fa != fa_src && !file.exists(fa)) sh(sprintf("gzip -dc %s > %s", shQuote(fa_src), shQuote(fa)))
+  if (!file.exists(fai)) sh(sprintf("samtools faidx --fai-idx %s %s", shQuote(fai), shQuote(fa)))
+})
+has_db <- function(p) any(file.exists(paste0(p, c(".nsq", ".nal", ".00.nsq"))))
+ACC$db <- map2_chr(ACC$db_ref, ACC$accession, function(p, a) {
+  if (has_db(p)) return(p)
+  w <- file.path(WORK, "blastdb", a)
+  if (!has_db(w)) sh(sprintf("makeblastdb -dbtype nucl -in %s -out %s",
+                             shQuote(ACC$fa[ACC$accession == a]), shQuote(w)))
+  w
+})
+
+grab <- function(acc, chr, s, e, rc = FALSE) {
+  a <- ACC[ACC$accession == acc, ]
+  o <- out(sprintf("samtools faidx --fai-idx %s %s %s:%d-%d", shQuote(a$fai), shQuote(a$fa), chr, s, e))
+  d <- DNAString(toupper(paste(o[-1], collapse = "")))
+  if (rc) reverseComplement(d) else d
+}
+gff_cols <- c("seqid","src","type","start","end","score","strand","phase","attr")
+read_gff <- function(gff, filter_awk) {
+  cat_cmd <- if (grepl("\\.gz$", gff)) "gzip -dc" else "cat"
+  txt <- out(sprintf("%s %s | awk -F'\\t' '%s'", cat_cmd, shQuote(gff), filter_awk))
+  if (!length(txt)) return(NULL)
+  read_tsv(I(txt), col_names = gff_cols, col_types = "ccciicccc") %>%
+    mutate(ID = str_match(attr, "(?:^|;)ID=([^;]+)")[, 2], Parent = str_match(attr, "Parent=([^;]+)")[, 2])
+}
+knitr::kable(ACC %>% transmute(accession, taxon, annotation, blast_db = basename(db)))
+```
+
+## 2. B73 query: the CDS of each gene
+
+```{r b73-cds}
+b73 <- ACC %>% filter(accession == "B73")
+b73_models <- map_dfr(GENES$b73_id, function(id)
+  read_gff(b73$gff, sprintf("$9 ~ /%s/", id)) %>% mutate(b73_id = id))
+cds_q <- GENES %>% rowwise() %>% mutate(seq = {
+  cds <- b73_models %>% filter(b73_id == .env$b73_id, type == "CDS", grepl("_T001", Parent))
+  rc <- cds$strand[1] == "-"
+  cds <- if (rc) arrange(cds, desc(start)) else arrange(cds, start)
+  as.character(do.call(xscat, map(seq_len(nrow(cds)), ~ grab("B73", cds$seqid[.x], cds$start[.x], cds$end[.x], rc))))
+}) %>% ungroup()
+qfa <- file.path(WORK, "cds_queries.fa")
+writeLines(paste0(">", cds_q$gene, "\n", cds_q$seq), qfa)
+knitr::kable(cds_q %>% transmute(gene, b73_id, cds_bp = nchar(seq),
+                                 start = substr(seq, 1, 3), end = substring(seq, nchar(seq) - 2)))
+```
+
+## 3. Orthologs: one locus per gene per accession
+
+`blastn` of both B73 CDSs against every genome. For each gene the ortholog is the best hit covering
+≥ 90 % of the CDS. **Paralog guard:** that locus must score higher with its own CDS than with the
+paralog's (Fd4 and Fd9 CDSs are ~85 % identical, so a teosinte Fd9 is also a decent Fd4 hit). The
+PanAnd gene model overlapping the hit gives the ortholog's ID and exon structure.
+
+```{r orthologs}
+bl_cols <- c("qseqid","sseqid","pident","length","qstart","qend","sstart","send","evalue","bitscore","qlen")
+hits <- map_dfr(seq_len(nrow(ACC)), function(i) {
+  o <- out(sprintf("blastn -task megablast -query %s -db %s -evalue 1e-20 -max_target_seqs 20 -num_threads %d -outfmt '6 %s'",
+                   shQuote(qfa), shQuote(ACC$db[i]), THREADS, paste(bl_cols, collapse = " ")))
+  if (!length(o)) return(NULL)
+  read_tsv(I(o), col_names = bl_cols, show_col_types = FALSE) %>% mutate(accession = ACC$accession[i])
+}) %>% mutate(strand = ifelse(send >= sstart, "+", "-"), lo = pmin(sstart, send), hi = pmax(sstart, send),
+              qcov = length / qlen)
+
+orth <- map_dfr(seq_len(nrow(ACC)), function(i) map_dfr(GENES$gene, function(g) {
+  a <- ACC$accession[i]
+  cand <- hits %>% filter(accession == a, qseqid == g, qcov >= 0.9) %>% arrange(desc(bitscore))
+  if (!nrow(cand)) return(tibble(accession = a, gene = g, status = "no hit"))
+  b <- cand[1, ]
+  para <- hits %>% filter(accession == a, qseqid != g, sseqid == b$sseqid, hi >= b$lo, lo <= b$hi)
+  para_bits <- if (nrow(para)) max(para$bitscore) else 0
+  atg <- if (b$strand == "+") b$sstart - (b$qstart - 1L) else b$sstart + (b$qstart - 1L)
+  cend <- if (b$strand == "+") b$send + (b$qlen - b$qend) else b$send - (b$qlen - b$qend)
+  tibble(accession = a, gene = g, chr = b$sseqid, strand = b$strand, atg = atg, cds_end = cend,
+         pident = b$pident, bits = b$bitscore, paralog_bits = para_bits,
+         next_bits = if (nrow(cand) > 1) cand$bitscore[2] else NA_real_,
+         status = ifelse(b$bitscore > para_bits, "ok", "PARALOG?"))
+}))
+
+# PanAnd / Helixer gene model overlapping each hit
+models <- map_dfr(seq_len(nrow(orth)), function(k) {
+  o <- orth[k, ]; if (o$status == "no hit") return(NULL)
+  g <- ACC$gff[ACC$accession == o$accession]
+  lo <- min(o$atg, o$cds_end); hi <- max(o$atg, o$cds_end)
+  gm <- read_gff(g, sprintf("$1==\"%s\" && $5>=%d && $4<=%d", o$chr, lo - 20000L, hi + 20000L))
+  if (is.null(gm)) return(NULL)
+  gmod <- gm %>% filter(type == "gene", end >= lo, start <= hi, strand == o$strand) %>% slice(1)
+  if (!nrow(gmod)) return(NULL)
+  tx <- gm %>% filter(type == "mRNA", Parent == gmod$ID) %>%
+    arrange(desc(grepl("canonical_transcript=1", attr))) %>% slice(1)
+  gm %>% filter(Parent == tx$ID, type %in% c("exon", "CDS", "five_prime_UTR", "three_prime_UTR")) %>%
+    mutate(accession = o$accession, gene = o$gene, model_id = gmod$ID)
+})
+orth <- orth %>% left_join(models %>% distinct(accession, gene, model_id), by = c("accession", "gene"))
+write_tsv(orth, file.path(RES, "orthologs.tsv"))
+knitr::kable(orth %>% transmute(gene, accession, model_id, locus = sprintf("%s:%s (%s)", chr, format(atg, big.mark = ","), strand),
+                                pident, bits, paralog_bits, status),
+             caption = "ATG position of each ortholog (from the CDS hit). paralog_bits = best score of the other gene's CDS at the same locus.")
+stopifnot(all(orth$status == "ok"))
+```
+
+## 4. Loci in gene orientation
+
+Each locus runs from `r UP` bp upstream of the ATG to `r DOWN` bp past the CDS end, reverse
+complemented for minus-strand genes, so position `r UP + 1` is the A of the ATG in every accession.
+Gene-model features are projected onto the same coordinates.
+
+```{r loci}
+orth <- orth %>% mutate(
+  from = ifelse(strand == "+", atg - UP, cds_end - DOWN),
+  to   = ifelse(strand == "+", cds_end + DOWN, atg + UP))
+to_locus <- function(g, o) if (o$strand == "+") g - o$from + 1L else o$to - g + 1L
+
+loci <- map(set_names(GENES$gene), function(g) {
+  oo <- orth %>% filter(gene == g)
+  s <- DNAStringSet(map(seq_len(nrow(oo)), function(k) grab(oo$accession[k], oo$chr[k], oo$from[k], oo$to[k], oo$strand[k] == "-")))
+  names(s) <- oo$accession
+  writeXStringSet(s, file.path(WORK, "loci", paste0(g, ".fa")))
+  s
+})
+feats <- models %>% left_join(orth %>% select(accession, gene, strand, from, to), by = c("accession", "gene")) %>%
+  rowwise() %>% mutate(s = to_locus(start, list(strand = strand.y, from = from, to = to)),
+                       e = to_locus(end,   list(strand = strand.y, from = from, to = to))) %>% ungroup() %>%
+  transmute(gene, accession, type, start = pmin(s, e), end = pmax(s, e)) %>% arrange(gene, accession, start)
+# first CDS exon of each accession (transcript order = locus order after orientation)
+cds1 <- feats %>% filter(type == "CDS") %>% group_by(gene, accession) %>% slice_min(start, n = 1) %>% ungroup()
+knitr::kable(feats %>% filter(type == "exon") %>% group_by(gene, accession) %>%
+               summarise(exons = paste(sprintf("%d-%d", start - UP - 1L, end - UP - 1L), collapse = ", "), .groups = "drop"),
+             caption = "Exons relative to the ATG (A = 0). The 5′UTR exon and intron lie upstream of the ATG.")
+```
+
+## 5. Alignment and conserved columns
+
+MAFFT E-INS-i (`--genafpair`, suited to long unalignable stretches such as indels/TEs) per gene.
+Conservation is evaluated on **B73 coordinates** of the alignment:
+
+- **invariant** = every accession has the B73 base, no gap, and no insertion in any accession
+  between this base and the next (an insertion would break a primer's contiguous match);
+- **SNP** = all accessions have a base (no gap/insertion) but not the same one — allowed only in pass 2.
+
+```{r align}
+aln <- map(set_names(GENES$gene), function(g) {
+  af <- file.path(WORK, "aln", paste0(g, ".aln.fa"))
+  if (!file.exists(af)) sh(sprintf("mafft --genafpair --maxiterate 1000 --thread %d --quiet %s > %s",
+                                   THREADS, shQuote(file.path(WORK, "loci", paste0(g, ".fa"))), shQuote(af)))
+  m <- as.matrix(readDNAMultipleAlignment(af))
+  m[c("B73", setdiff(rownames(m), "B73")), , drop = FALSE]
+})
+
+cons <- imap(aln, function(m, g) {
+  cols <- which(m["B73", ] != "-"); n <- length(cols)
+  col_ok <- function(cc) { x <- m[, cc]; c(all(x != "-" & x != "N"), length(unique(x)) == 1L) }
+  st <- vapply(cols, col_ok, logical(2))
+  ins_after <- vapply(seq_len(n), function(i) {
+    if (i == n) return(FALSE); between <- seq_len(cols[i + 1] - cols[i] - 1) + cols[i]
+    length(between) > 0 && any(m[, between, drop = FALSE] != "-") }, logical(1))
+  brk <- ins_after | c(FALSE, ins_after[-n])
+  # per-column entropy over bases only (gaps tracked separately so a large indel is not "entropy")
+  ent <- vapply(cols, function(cc) { x <- m[, cc]; x <- x[x %in% c("A","C","G","T")]
+    if (!length(x)) return(NA_real_); p <- table(x) / length(x); -sum(p * log2(p)) }, numeric(1))
+  gapf <- vapply(cols, function(cc) mean(m[, cc] == "-"), numeric(1))
+  tibble(gene = g, pos = seq_len(n), b73 = m["B73", cols],
+         status = case_when(!st[1, ] | brk ~ "gap", st[2, ] ~ "invariant", TRUE ~ "snp"),
+         entropy = ent, gap_frac = gapf, col = cols)
+})
+cons_all <- bind_rows(cons)
+knitr::kable(cons_all %>% count(gene, status) %>% pivot_wider(names_from = status, values_from = n),
+             caption = "B73 positions of each locus by cross-accession status.")
+```
+
+```{r cons-plot, fig.height=4}
+cons_all %>% mutate(x = pos - UP - 1L) %>% group_by(gene) %>%
+  mutate(invariant = stats::filter(status == "invariant", rep(1/50, 50), sides = 2),
+         gaps = stats::filter(status == "gap", rep(1/50, 50), sides = 2)) %>%
+  select(gene, x, invariant, gaps) %>% pivot_longer(c(invariant, gaps)) %>%
+  ggplot(aes(x, value, colour = name)) + geom_line(linewidth = 0.4) + facet_wrap(~gene, ncol = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(x = "position relative to ATG (bp, B73)", y = "fraction in 50-bp window", colour = NULL,
+       title = "Conservation along each locus") + theme_bw()
+```
+
+## 6. Primer3 on the conserved template
+
+The B73 locus is the template, with every non-invariant position replaced by `N` and
+`PRIMER_MAX_NS_ACCEPTED=0`, so Primer3 can only place primers on sites identical in all
+accessions. `SEQUENCE_PRIMER_PAIR_OK_REGION_LIST` confines the forward primer to the region
+upstream of the ATG and the reverse primer to the first CDS exon.
+
+```{r p3}
+iupac <- c(A="A",C="C",G="G",T="T",AG="R",CT="Y",CG="S",AT="W",GT="K",AC="M",CGT="B",AGT="D",ACT="H",ACG="V",ACGT="N")
+iupac_col <- function(x) iupac[[paste(sort(unique(x)), collapse = "")]]
+fold_deg <- function(s) { k <- c(R=2,Y=2,S=2,W=2,K=2,M=2,B=3,D=3,H=3,V=3,N=4)[strsplit(s, "")[[1]]]; prod(k, na.rm = TRUE) }
+deg_primer <- function(m, cols, rev) {
+  s <- vapply(cols, function(cc) iupac_col(m[, cc]), "")
+  s <- paste(s, collapse = ""); if (rev) as.character(reverseComplement(DNAString(s))) else s
+}
+run_p3 <- function(g, pass) {
+  cs <- cons[[g]]; b <- cds1 %>% filter(gene == g, accession == "B73")
+  keep <- if (pass == 1) cs$status == "invariant" else cs$status != "gap"
+  tmpl <- paste(ifelse(keep, cs$b73, "N"), collapse = "")
+  p3in <- file.path(WORK, "p3", sprintf("%s_pass%d.in", g, pass)); p3out <- sub("\\.in$", ".out", p3in)
+  writeLines(c(sprintf("SEQUENCE_ID=%s_pass%d", g, pass), paste0("SEQUENCE_TEMPLATE=", tmpl),
+    sprintf("SEQUENCE_PRIMER_PAIR_OK_REGION_LIST=0,%d,%d,%d", UP, b$start - 1L, b$end - b$start + 1L),
+    "PRIMER_TASK=generic", "PRIMER_FIRST_BASE_INDEX=0", "PRIMER_PICK_INTERNAL_OLIGO=0",
+    sprintf("PRIMER_PRODUCT_SIZE_RANGE=%d-%d", PRODUCT[1], PRODUCT[2]),
+    "PRIMER_MIN_SIZE=19", "PRIMER_OPT_SIZE=22", "PRIMER_MAX_SIZE=27",
+    "PRIMER_MIN_TM=57.0", "PRIMER_OPT_TM=60.0", "PRIMER_MAX_TM=63.0", "PRIMER_PAIR_MAX_DIFF_TM=3.0",
+    "PRIMER_MIN_GC=40.0", "PRIMER_OPT_GC_PERCENT=50.0", "PRIMER_MAX_GC=60.0",
+    "PRIMER_GC_CLAMP=1", "PRIMER_MAX_POLY_X=4", "PRIMER_MAX_NS_ACCEPTED=0",
+    "PRIMER_EXPLAIN_FLAG=1", "PRIMER_NUM_RETURN=50", "="), p3in)
+  sh(sprintf("primer3_core %s > %s", shQuote(p3in), shQuote(p3out)))
+  L <- readLines(p3out); L <- L[grepl("=", L, fixed = TRUE) & L != "="]
+  kv <- strsplit(L, "=", fixed = TRUE)
+  d <- setNames(vapply(kv, function(x) paste(x[-1], collapse = "="), ""), vapply(kv, `[`, "", 1))
+  np <- as.integer(d[["PRIMER_PAIR_NUM_RETURNED"]])
+  if (np == 0) { message(g, " pass ", pass, ": ", d[["PRIMER_PAIR_EXPLAIN"]]); return(NULL) }
+  m <- aln[[g]]
+  map_dfr(0:(np - 1), function(i) {
+    v <- function(k) d[[sprintf(k, i)]]
+    lp <- as.integer(strsplit(v("PRIMER_LEFT_%d"), ",")[[1]]); rp <- as.integer(strsplit(v("PRIMER_RIGHT_%d"), ",")[[1]])
+    f <- (lp[1] + 1L):(lp[1] + lp[2]); r <- (rp[1] - rp[2] + 2L):(rp[1] + 1L)     # 1-based B73 locus positions
+    Fd <- deg_primer(m, cs$col[f], FALSE); Rd <- deg_primer(m, cs$col[r], TRUE)
+    tibble(gene = g, pass = pass, rank = i, penalty = round(as.numeric(v("PRIMER_PAIR_%d_PENALTY")), 3),
+      prod_b73 = as.integer(v("PRIMER_PAIR_%d_PRODUCT_SIZE")),
+      F_seq = Fd, R_seq = Rd, F_len = lp[2], R_len = rp[2],
+      F_tm = round(as.numeric(v("PRIMER_LEFT_%d_TM")), 1), R_tm = round(as.numeric(v("PRIMER_RIGHT_%d_TM")), 1),
+      F_gc = round(as.numeric(v("PRIMER_LEFT_%d_GC_PERCENT")), 1), R_gc = round(as.numeric(v("PRIMER_RIGHT_%d_GC_PERCENT")), 1),
+      F_from_atg = min(f) - UP - 1L, R_from_atg = max(r) - UP - 1L,
+      deg = str_count(paste0(Fd, Rd), "[^ACGT]"),
+      fold = fold_deg(paste0(Fd, Rd)),
+      end3_ok = !grepl("[^ACGT]", str_sub(Fd, -5)) & !grepl("[^ACGT]", str_sub(Rd, -5)))
+  })
+}
+pairs <- map_dfr(GENES$gene, function(g) {
+  p <- run_p3(g, 1)
+  if (is.null(p)) p <- run_p3(g, 2) %>% filter(end3_ok, deg <= 4, fold <= 16)
+  p
+})
+stopifnot(nrow(pairs) > 0)
+```
+
+## 7. Every primer must bind every accession
+
+Each primer (degenerate primers as IUPAC patterns) is matched exactly against each accession's
+locus; the product size per accession follows from the two sites.
+
+```{r binding}
+bind_check <- pairs %>% rowwise() %>% mutate(chk = list(map_dfr(names(loci[[gene]]), function(a) {
+  s <- loci[[gene]][[a]]
+  fh <- start(matchPattern(DNAString(F_seq), s, fixed = "subject"))
+  rh <- end(matchPattern(reverseComplement(DNAString(R_seq)), s, fixed = "subject"))
+  tibble(accession = a, F_sites = length(fh), R_sites = length(rh),
+         product = if (length(fh) == 1 && length(rh) == 1) rh - fh + 1L else NA_integer_)
+}))) %>% ungroup() %>%
+  mutate(all_bind = map_lgl(chk, ~ all(.x$F_sites == 1 & .x$R_sites == 1)),
+         min_prod = map_int(chk, ~ suppressWarnings(min(.x$product))),
+         max_prod = map_int(chk, ~ suppressWarnings(max(.x$product))))
+cand <- bind_check %>% filter(all_bind) %>% group_by(gene) %>% arrange(penalty, .by_group = TRUE) %>%
+  slice_head(n = 5) %>% mutate(name = sprintf("%s-P%d", gene, row_number())) %>% ungroup()
+knitr::kable(bind_check %>% count(gene, all_bind), caption = "Primer3 pairs whose both primers bind once in every accession.")
+```
+
+## 8. Whole-genome e-PCR specificity
+
+`-n 3 -g 1`: up to 3 mismatches and 1 gap per primer (as in `primermu`). A good pair gives
+**one** product per genome, at its own locus, and nothing at the paralog.
+
+```{r epcr}
+jia <- read_tsv("config/jia2025_primers.tsv", show_col_types = FALSE)
+jia_pairs <- tibble(name = c("Jia-G1 (G-F1/G-R1)", "Jia-G2 (G-F2/G-R2)", "Jia-Fd9-JD"), gene = c("ZmFd4", "ZmFd4", "ZmFd9"),
+                    F_seq = jia$seq[match(c("ZmFd4-G-F1", "ZmFd4-G-F2", "ZmFd9-JD-F"), jia$name)],
+                    R_seq = jia$seq[match(c("ZmFd4-G-R1", "ZmFd4-G-R2", "ZmFd9-JD-R"), jia$name)])
+sts_tbl <- bind_rows(cand %>% select(name, gene, F_seq, R_seq), jia_pairs)
+sts <- file.path(WORK, "epcr", "pairs.sts")
+writeLines(sprintf("%s\t%s\t%s\t100-5000", str_replace_all(sts_tbl$name, "[ ()/]", "_"), sts_tbl$F_seq, sts_tbl$R_seq), sts)
+ep <- map_dfr(seq_len(nrow(ACC)), function(i) {
+  o <- file.path(WORK, "epcr", paste0(ACC$accession[i], ".txt"))
+  if (!file.exists(o)) sh(sprintf("e-PCR -n 3 -g 1 -m 50 -w 7 -t 3 -a f -o %s %s %s", shQuote(o), shQuote(sts), shQuote(ACC$fa[i])))
+  if (!file.info(o)$size) return(NULL)
+  read_tsv(o, comment = "#", show_col_types = FALSE, col_names = c("seq","sts","strand","from","to","size","mism","gaps","x")) %>%
+    mutate(accession = ACC$accession[i])
+}) %>% left_join(sts_tbl %>% mutate(sts = str_replace_all(name, "[ ()/]", "_")) %>% select(sts, name, pair_gene = gene), by = "sts")
+# where is each product: own locus, paralog locus, elsewhere
+ep <- ep %>% rowwise() %>% mutate(hit_at = {
+  o <- orth %>% filter(accession == .env$accession, chr == seq, from <= .env$to, to >= .env$from)
+  if (!nrow(o)) "elsewhere" else if (o$gene[1] == pair_gene) "own locus" else "PARALOG"
+}) %>% ungroup()
+spec <- ep %>% count(name, accession, hit_at) %>% pivot_wider(names_from = hit_at, values_from = n, values_fill = 0)
+write_tsv(ep, file.path(RES, "epcr_hits.tsv"))
+knitr::kable(spec, caption = "e-PCR products per pair and genome.")
+```
+
+## 9. Recommended pairs
+
+```{r final}
+specific <- spec %>% group_by(name) %>%
+  summarise(single = all(`own locus` == 1) & all(if ("PARALOG" %in% names(spec)) PARALOG == 0 else TRUE) &
+                     all(if ("elsewhere" %in% names(spec)) elsewhere == 0 else TRUE), .groups = "drop")
+final <- cand %>% left_join(specific, by = "name") %>% filter(single %in% TRUE)
+write_tsv(final %>% select(name, gene, pass, F_seq, R_seq, F_len, R_len, F_tm, R_tm, F_gc, R_gc,
+                           F_from_atg, R_from_atg, prod_b73, min_prod, max_prod, deg, penalty),
+          file.path(RES, "primers.tsv"))
+knitr::kable(final %>% transmute(name, forward = F_seq, reverse = R_seq, `F Tm` = F_tm, `R Tm` = R_tm,
+                                 `F 5′ vs ATG` = F_from_atg, `R 3′ end vs ATG` = R_from_atg,
+                                 `B73 bp` = prod_b73, `range across accessions` = sprintf("%d–%d", min_prod, max_prod),
+                                 degenerate = deg, penalty),
+             caption = "Pairs that bind every accession once and give a single whole-genome e-PCR product in every genome.")
+```
+
+## 10. Jia *et al.* 2025 primers as a benchmark
+
+Jia's primers mapped onto every locus (up to 3 mismatches). For ZmFd4, the G-F1/G-R1 product size
+calls the InDel194 allele group: full promoter (Hap1) vs. the 604-bp deletion (Hap2).
+
+```{r jia}
+jia_map <- jia %>% filter(gene %in% GENES$gene) %>% rowwise() %>% mutate(m = list(map_dfr(names(loci[[gene]]), function(a) {
+  s <- loci[[gene]][[a]]; p <- DNAString(seq)
+  hf <- matchPattern(p, s, max.mismatch = 3); hr <- matchPattern(reverseComplement(p), s, max.mismatch = 3)
+  h <- c(start(hf), end(hr)); mm <- c(nmismatch(p, hf), nmismatch(reverseComplement(p), hr))
+  tibble(accession = a, sites = length(h), pos = if (length(h)) h[which.min(mm)] - UP - 1L else NA_integer_,
+         mism = if (length(h)) min(mm) else NA_integer_)
+}))) %>% ungroup() %>% unnest(m)
+knitr::kable(jia_map %>% transmute(name, accession, mism = ifelse(is.na(mism), "no site (>3 mm)", as.character(mism))) %>%
+               pivot_wider(names_from = accession, values_from = mism),
+             caption = "Mismatches of each Jia primer at its best site in each locus.")
+g1 <- jia_map %>% filter(name %in% c("ZmFd4-G-F1", "ZmFd4-G-R1")) %>% select(name, accession, pos) %>%
+  pivot_wider(names_from = name, values_from = pos) %>% mutate(G1_bp = `ZmFd4-G-R1` - `ZmFd4-G-F1` + 1L)
+knitr::kable(g1 %>% transmute(accession, `G-F1/G-R1 product (bp)` = G1_bp,
+                              InDel194 = case_when(is.na(G1_bp) ~ "?", G1_bp > 1700 ~ "Hap1 (full)", TRUE ~ "Hap2 (deletion)")),
+             caption = "ZmFd4 InDel194 call from Jia's G-F1/G-R1 product (B73 Hap1 ≈ 1,908 bp; Hap2 ≈ 604 bp shorter).")
+```
+
+## 11. Maps
+
+```{r maps, fig.height=7}
+draw_gene <- function(g) {
+  ls <- loci[[g]]
+  seqs <- tibble(seq_id = names(ls), length = Biostrings::width(ls))
+  ft <- feats %>% filter(gene == g, type %in% c("exon", "CDS")) %>%
+    transmute(seq_id = accession, start, end, feat_type = type)
+  fp <- final %>% filter(gene == g) %>% slice_head(n = 1)
+  prim <- map_dfr(names(ls), function(a) {
+    s <- ls[[a]]
+    if (!nrow(fp)) return(NULL)
+    f <- matchPattern(DNAString(fp$F_seq), s, fixed = "subject"); r <- matchPattern(reverseComplement(DNAString(fp$R_seq)), s, fixed = "subject")
+    tibble(seq_id = a, start = c(start(f), start(r)), end = c(end(f), end(r)), feat_type = c("forward primer", "reverse primer"))
+  })
+  # alignment blocks between adjacent tracks from pairwise blastn
+  links <- map_dfr(seq_len(length(ls) - 1), function(k) {
+    a <- tempfile(fileext = ".fa"); b <- tempfile(fileext = ".fa")
+    writeXStringSet(ls[k], a); writeXStringSet(ls[k + 1], b)
+    o <- out(sprintf("blastn -query %s -subject %s -evalue 1e-20 -outfmt '6 qstart qend sstart send pident'", a, b))
+    if (!length(o)) return(NULL)
+    read_tsv(I(o), col_names = c("start","end","start2","end2","pident"), show_col_types = FALSE) %>%
+      filter(start2 < end2) %>% mutate(seq_id = names(ls)[k], seq_id2 = names(ls)[k + 1])
+  })
+  gggenomes(seqs = seqs, feats = list(ft, prim), links = links) +
+    geom_link(aes(fill = pident), alpha = 0.35, colour = NA) +
+    geom_seq() + geom_bin_label() +
+    geom_feat(data = feats(ft), aes(colour = feat_type), linewidth = 4, position = "identity") +
+    geom_feat(data = feats(prim), aes(colour = feat_type), linewidth = 6, position = "identity") +
+    scale_colour_manual(values = c(exon = "#DAA520", CDS = "#8B6914", "forward primer" = "#1F6FB4", "reverse primer" = "#B4451F"), name = NULL) +
+    scale_fill_viridis_c(name = "% identity", option = "C") +
+    labs(title = sprintf("%s locus, ATG at %d (gene orientation)", g, UP + 1L),
+         subtitle = if (nrow(fp)) sprintf("%s: %s / %s", fp$name, fp$F_seq, fp$R_seq) else "no pair passed") +
+    theme(legend.position = "bottom")
+}
+for (g in GENES$gene) { p <- draw_gene(g); ggsave(file.path(RES, sprintf("map_%s.png", g)), p, width = 12, height = 7, dpi = 150); print(p) }
+```
+
+## Next / TODO (student)
+
+- Motif scan of the amplified region (FIMO + MAST, JASPAR 2024 CORE Plantae); genome-specific
+  background (`fasta-get-markov`); nitrogen motif set (NLP / NIGT1).
+- Variant catalogue and sequence classes of the amplified region; LD among variants.
+- Synteny confirmation of orthologs (neighbouring genes), beyond the paralog score guard.
+- Population check with the MaizeGDB 2026 teosinte VCFs.
+
+```{r sessioninfo}
+#| code-fold: true
+sessionInfo()
+```
