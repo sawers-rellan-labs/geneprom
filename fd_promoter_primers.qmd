@@ -738,7 +738,7 @@ annotation_map <- function(pr) {
     scale_color_manual(name = NULL,
       values = c("homology" = "#7FA8C0", "Exon" = "#DAA520", "amplicon" = "#2E8B57", "off_target" = "#C0392B", "weak_off" = "grey60",
                  "indel" = "#7B2D8B", "TE" = "#2C6E8F"),
-      labels = c("indel" = "InDel194 (Jia 2025), B73 coordinates", "TE" = "TE (EDTA; RIL003 not annotated)", "homology" = "Homology to the other products (blastn)", "Exon" = "Exon of overlapping gene",
+      labels = c("indel" = "InDel194 (Jia 2025), B73 coordinates", "TE" = "Transposable element (EDTA annotation; none for RIL003)", "homology" = "Homology to the other products (blastn)", "Exon" = "Exon of overlapping gene",
                  "amplicon" = "Expected product (own locus / alt haplotype)", "off_target" = "Off-target, 3' ends match",
                  "weak_off" = "Off-target, 3' mismatch")) +
     scale_fill_manual(name = NULL, values = c("forward_primer" = "#1F6FB4", "reverse_primer" = "#B4451F"),
