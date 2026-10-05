@@ -54,7 +54,7 @@ ACC  <- read_tsv(if (MODE == "stub") "config/accessions_stub.tsv" else "config/a
                  show_col_types = FALSE)
 WORK <- file.path("work", MODE)
 RES  <- if (MODE == "stub") file.path(WORK, "results") else "results"
-for (d in file.path(WORK, c("", "fai", "blastdb", "genomes", "loci", "aln", "p3", "epcr")))
+for (d in file.path(WORK, c("", "fai", "blastdb", "loci", "aln", "p3", "epcr")))
   dir.create(d, showWarnings = FALSE, recursive = TRUE)
 dir.create(RES, showWarnings = FALSE, recursive = TRUE)
 THREADS <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", "4"))
@@ -75,21 +75,22 @@ cat(sprintf("mode = %s | %d accessions | reference dir %s\n", MODE, nrow(ACC), R
 
 ## 1. Genomes: plain FASTA, index, BLAST database
 
-Genomes are read in place from `r REF`; only a gzipped genome (RIL003) is decompressed into
-`work/` (e-PCR needs plain FASTA). FASTA indexes and any missing BLAST DB are written to `work/`,
-never next to the shared references.
+Genomes are read in place from `r REF`. A gzipped genome (RIL003) is decompressed once **next to
+its original** in `r REF` (e-PCR needs plain FASTA), so every project can reuse it. FASTA indexes and
+any missing BLAST DB are written to `work/`.
 
 ```{r genomes}
 ACC <- ACC %>% mutate(
   fa_src = file.path(REF, genome),
-  fa     = ifelse(grepl("\\.gz$", genome), file.path(WORK, "genomes", paste0(accession, ".fa")), fa_src),
+  fa     = sub("\\.gz$", "", fa_src),                       # plain FASTA, same folder as the original
   fai    = file.path(WORK, "fai", paste0(accession, ".fa.fai")),
   gff    = file.path(REF, gff),
   db_ref = sub("\\.fa(\\.gz)?$", "", fa_src))
 stopifnot(all(file.exists(ACC$fa_src)))
 
 for (i in seq_len(nrow(ACC))) with(ACC[i, ], {
-  if (fa != fa_src && !file.exists(fa)) sh(sprintf("gzip -dc %s > %s", shQuote(fa_src), shQuote(fa)))
+  if (fa != fa_src && !file.exists(fa))                     # write to .tmp, rename when complete
+    sh(sprintf("gzip -dc %s > %s.tmp && mv %s.tmp %s", shQuote(fa_src), shQuote(fa), shQuote(fa), shQuote(fa)))
   if (!file.exists(fai)) sh(sprintf("samtools faidx --fai-idx %s %s", shQuote(fai), shQuote(fa)))
 })
 has_db <- function(p) any(file.exists(paste0(p, c(".nsq", ".nal", ".00.nsq"))))
