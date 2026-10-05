@@ -62,6 +62,13 @@ sbatch container/build_container.sbatch   # when container/ changes: /share/maiz
 sbatch scripts/render.sbatch              # full run -> results/, docs/fd_promoter_primers.html
 ```
 
+## Overview diagram
+
+`docs/pipeline.svg`, shown at the top of the report, is a metro map of the notebook sections made with
+[nf-metro](https://github.com/seqeralabs/nf-metro) (same style as the zealgt map). It is independent of
+the notebook: edit `docs/pipeline.mmd` when sections change and re-render on the laptop with
+`nf-metro render docs/pipeline.mmd -o docs/pipeline.svg` (`pip install nf-metro`, Python ≥ 3.11).
+
 ## Layout
 
 ```

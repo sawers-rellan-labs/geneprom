@@ -25,6 +25,8 @@ execute:
 assembly, so the region can be resequenced (cf. Jia *et al.* 2025, who resequenced a 2.9-kb ZmFd4
 fragment and found InDel194, a 604-bp deletion upstream of the ATG).
 
+![Analysis overview: each block is a group of notebook sections (§); the red line is the primer design, the dashed grey lines are the checks. Source: `docs/pipeline.mmd` (nf-metro).](docs/pipeline.svg){width=80%}
+
 ## Bottom line
 
 ::: {#bottom-line-slot}

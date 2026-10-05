@@ -1,0 +1,52 @@
+%%metro mode: light
+%%metro font_scale: 1.3
+%%metro file: inputs | FASTA
+%%metro file: pairs | TSV
+%%metro line: orth | Orthologs | #1F6FB4
+%%metro line: primer | Primer design | #B4451F
+%%metro line: check | Checks | #7F7F7F | dashed
+%%metro legend: bl
+%%metro grid: orthologs | 0,0
+%%metro grid: design | 0,1
+%%metro grid: output | 0,2
+
+graph LR
+    subgraph orthologs [Orthologs §1-3b]
+        %%metro exit: right | primer
+        inputs[genomes, proteomes]
+        rbh[protein RBH]
+        tree[gene tree]
+
+        inputs -->|orth| rbh
+        rbh -->|orth| tree
+    end
+
+    subgraph design [Primer design §4-7]
+        %%metro entry: left | primer
+        %%metro exit: right | primer
+        loci[loci]
+        aln[alignment]
+        sites[conserved sites]
+        p3[Primer3 max 3 kb]
+        bind[binds every locus]
+
+        loci -->|primer| aln
+        aln -->|primer| sites
+        sites -->|primer| p3
+        p3 -->|primer| bind
+    end
+
+    subgraph output [Specificity and output §8-10]
+        %%metro entry: left | primer
+        jia[Jia 2025 primers]
+        epcr[whole-genome e-PCR]
+        amp[amplicons vs B73]
+        pairs[pairs]
+
+        jia -->|check| epcr
+        epcr -->|primer| pairs
+        epcr -->|check| amp
+    end
+
+    rbh -->|primer| loci
+    bind -->|primer| epcr
