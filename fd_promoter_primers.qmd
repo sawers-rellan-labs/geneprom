@@ -643,8 +643,11 @@ for (i in seq_len(nrow(final))) {
 
 ## 10. Jia *et al.* 2025 primers as a benchmark
 
-Jia's primers mapped onto every locus (up to 3 mismatches). For ZmFd4, the G-F1/G-R1 product size
-calls the InDel194 allele group: full promoter (Hap1) vs. the 604-bp deletion (Hap2).
+Jia's primers mapped onto every locus (up to 3 mismatches). **InDel194 call:** B73 carries the full
+promoter (Hap1); InDel194 is the 604-bp block ending 194 bp upstream of the ATG (B73 positions −798…−195).
+Each locus is called from the alignment (§5) by the fraction of those B73 positions that are gapped:
+> 80 % = Hap2 (deletion), < 20 % = Hap1 (full), otherwise partial. Product length alone is not used:
+other insertions elsewhere in the product (e.g. in *Z. luxurians*) change it independently.
 
 ```{r jia}
 jia_map <- jia %>% filter(gene %in% GENES$gene) %>% rowwise() %>% mutate(m = list(map_dfr(names(loci[[gene]]), function(a) {
@@ -659,9 +662,13 @@ knitr::kable(jia_map %>% transmute(name, accession, mism = ifelse(is.na(mism), "
              caption = "Mismatches of each Jia primer at its best site in each locus.")
 g1 <- jia_map %>% filter(name %in% c("ZmFd4-G-F1", "ZmFd4-G-R1")) %>% select(name, accession, pos) %>%
   pivot_wider(names_from = name, values_from = pos) %>% mutate(G1_bp = `ZmFd4-G-R1` - `ZmFd4-G-F1` + 1L)
-knitr::kable(g1 %>% transmute(accession, `G-F1/G-R1 product (bp)` = G1_bp,
-                              InDel194 = case_when(is.na(G1_bp) ~ "?", G1_bp > 1700 ~ "Hap1 (full)", TRUE ~ "Hap2 (deletion)")),
-             caption = "ZmFd4 InDel194 call from Jia's G-F1/G-R1 product (B73 Hap1 ≈ 1,908 bp; Hap2 ≈ 604 bp shorter).")
+indel_pos <- (UP + 1L - 194L - 604L):(UP + 1L - 195L)               # B73 locus positions of the 604-bp block
+m4 <- aln[["ZmFd4"]]; bcols <- cons[["ZmFd4"]]$col[indel_pos]
+indel194 <- tibble(accession = rownames(m4), gapped = rowMeans(m4[, bcols, drop = FALSE] == "-")) %>%
+  mutate(InDel194 = case_when(gapped > 0.8 ~ "Hap2 (deletion)", gapped < 0.2 ~ "Hap1 (full)", TRUE ~ "partial"))
+g1 <- g1 %>% left_join(indel194, by = "accession")
+knitr::kable(g1 %>% transmute(accession, `G-F1/G-R1 product (bp)` = G1_bp, `% of block gapped` = round(100 * gapped), InDel194),
+             caption = "ZmFd4 InDel194 per locus, from the alignment over the B73 block (−798…−195 from the ATG).")
 ```
 
 ## 11. Locus microsynteny (maps)
@@ -705,7 +712,8 @@ for (g in GENES$gene) { p <- draw_gene(g); ggsave(file.path(RES, sprintf("map_%s
 
 ```{r bottom-line, results="asis"}
 n_alt <- orth %>% filter(hap == "alt"); unpl <- orth %>% filter(hap == "primary", placement == "unplaced")
-fd4_alleles <- if (exists("g1")) g1 %>% filter(!is.na(G1_bp)) %>% mutate(a = ifelse(G1_bp > 1700, "Hap1", "Hap2")) %>% count(a) else NULL
+fd4_alleles <- if (exists("indel194")) indel194 %>% mutate(a = case_when(accession == "B73" ~ "Hap1 in B73", TRUE ~ sub(" .*", "", InDel194))) %>%
+  count(a) %>% mutate(a = ifelse(a == "Hap1 in B73", a, paste(a, "in teosinte"))) else NULL
 pairs_md <- if (nrow(final)) paste0("| Pair | Forward | Reverse | Product (all loci) | Off-locus products* |\n|---|---|---|---|---|\n",
   paste(sprintf("| **%s** | `%s` | `%s` | %s–%s bp | %d |", final$name, final$F_seq, final$R_seq,
                 format(final$min_prod, big.mark = ","), format(final$max_prod, big.mark = ","), final$weak_off), collapse = "\n")) else
@@ -714,8 +722,8 @@ cat('::: {#bottom-line-content}\n',
     sprintf("- **Orthologs:** ZmFd4 and ZmFd9 found in all %d genomes by protein reciprocal best hit (§3, tree §3b).", nrow(ACC)),
     if (nrow(n_alt)) sprintf(" Second haplotypes (`alt`): %s.", paste(sprintf("%s %s", taxon_prefix(n_alt$genome), sub("Zm", "", n_alt$gene)), collapse = ", ")) else "",
     if (nrow(unpl)) sprintf(" **Unplaced** (no copy on a chromosome): %s.", paste(sprintf("%s %s", taxon_prefix(unpl$genome), sub("Zm", "", unpl$gene)), collapse = ", ")) else "",
-    "\n", if (!is.null(fd4_alleles)) sprintf("- **ZmFd4 InDel194** (Jia G-F1/G-R1 product): %s.\n",
-                                             paste(sprintf("%s in %d loci", fd4_alleles$a, fd4_alleles$n), collapse = ", ")) else "",
+    "\n", if (!is.null(fd4_alleles)) sprintf("- **ZmFd4 InDel194** (alignment over the 604-bp B73 block, §10): %s.\n",
+                                             paste(sprintf("%s (%d loci)", fd4_alleles$a, fd4_alleles$n), collapse = ", ")) else "",
     "- **Recommended pairs** — each binds every locus once (both haplotypes), no degenerate bases unless stated, ",
     "no off-locus product with matching 3′ ends in any genome (§8); amplicons aligned to B73 in §9b:\n\n", pairs_md,
     "\n\n<small>* off-locus products with a mismatch in a primer's 3′-most 5 nt (not expected to amplify).</small>\n:::\n",
