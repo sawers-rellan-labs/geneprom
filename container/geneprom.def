@@ -29,7 +29,7 @@ From: mambaorg/micromamba:2.0.5
     export QUARTO_R=/opt/conda/bin/R
 
 %test
-    for t in samtools bedtools seqkit blastn mafft primer3_core ntthal fimo mast e-PCR re-PCR FastTree quarto Rscript; do
+    for t in samtools bedtools seqkit gffread blastn mafft primer3_core ntthal fimo mast e-PCR re-PCR FastTree quarto Rscript; do
         command -v $t >/dev/null || { echo "missing $t"; exit 1; }
     done
     Rscript -e 'suppressPackageStartupMessages({library(gggenomes); library(Biostrings); library(ape); library(ggtree)})'

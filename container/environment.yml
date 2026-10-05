@@ -12,6 +12,7 @@ dependencies:
   - htslib
   - bedtools
   - seqkit
+  - gffread
   # homology / alignment
   - blast
   - mafft
