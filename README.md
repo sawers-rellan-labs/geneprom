@@ -4,47 +4,75 @@ Primers to amplify and resequence the region upstream of the ATG of the maize fe
 **ZmFd4** (`Zm00001eb083950`, v4 `Zm00001d003797`) and **ZmFd9** (`Zm00001eb421930`, v4
 `Zm00001d025352`) in all published PanAnd *Zea* teosinte assemblies, followed by annotation of
 that region. Follows Jia *et al.* (2025, *Nature Plants* 11:643) for ZmFd4 (InDel194, a 604-bp
-deletion upstream of the ATG) and the degenerate-primer approach of Gorrón *et al.* (2012).
+deletion upstream of the ATG) and the conserved-site primer approach of Gorrón *et al.* (2012).
 
 The pipeline is one Quarto notebook, **`fd_promoter_primers.qmd`**, in R, calling external tools via
 `system2()` (same style as `sawers-rellan-labs/primermu`). It runs on Hazel inside an Apptainer
-image.
+image; a stub mode runs on the laptop.
 
 ## Design rules
 
-- **Reverse primer:** most conserved site in the **first CDS exon** (v5 exon 2; v5 exon 1 is a
-  non-coding 5′UTR exon), required to bind **every** accession; variable positions become IUPAC
-  degenerate bases, the 3′-most 5 nt must be invariant.
-- **Forward primer:** conserved site upstream giving a Primer3 product of **2,500–3,000 bp**.
-- **Specificity:** forward e-PCR over every whole genome — one product per accession, none from
-  the paralog (Fd4 ↔ Fd9).
+- **Orthologs:** reciprocal best hit of each B73 CDS against all B73 genes; primary locus on the
+  B73-matching chromosome (else any `chr*`); the best hit on an `alt-*` scaffold is the accession's
+  second haplotype and must be amplified too. A gene tree of every hit (`results/ferredoxin_tree.png`)
+  places all copies among the 11 named B73 ferredoxins.
+- **Reverse primer** in the **first CDS exon** (v5 exon 2; v5 exon 1 is a non-coding 5′UTR exon).
+- Primer sites chosen by **conservation**: identical and gap-free in every locus (IUPAC degenerate
+  bases only if nothing invariant exists, with an invariant 3′ 5 nt).
+- **Product ≤ 3,000 bp in every locus**; ranked by the product in the shortest locus, then Primer3
+  penalty; backup pairs use different sites.
+- **Specificity:** forward e-PCR over every whole genome; an unexpected product disqualifies a pair
+  when neither primer has a mismatch in its 3′-most 5 nt.
 - Jia's own primers (`config/jia2025_primers.tsv`) are mapped and scored as a benchmark.
 
-## Accessions
+## Inputs (assumed present)
 
-`config/accessions.tsv`: B73 v5 (coordinate reference) + TIL01, TIL11 (*parviglumis*), TIL18,
-TIL25 (*mexicana*), RIMHU001 (*huehuetenangensis*), Gigi, Momo (*diploperennis*), PI615697
-(*nicaraguensis*), RIL003 (*luxurians*, Helixer annotation only). Genomes are read from
-`/rsstu/users/r/rrellan/BZea/ref` via symlinks in `data/` — nothing is downloaded.
+Reference data are a starting point, prepared once outside this repo; the notebook checks they
+exist and stops with a list of anything missing. For every row of `config/accessions.tsv`, in
+`/rsstu/users/r/rrellan/BZea/ref`:
 
-## Running on Hazel
+| File | Used for |
+|---|---|
+| `<assembly>.fa` (plain FASTA) | locus extraction, e-PCR |
+| `<assembly>.n*` nucleotide BLAST DB (`-parse_seqids`) | ortholog search |
+| `<assembly>_<annotation>.gff3` (RIL003: `_helixer.gff.gz`) | gene models |
+| `<assembly>_<annotation>.protein.fa` + `.fai` + `.p*` protein BLAST DB (`-parse_seqids`) | protein retrieval / blastp |
+
+Accessions: B73 v5 (coordinate reference) + TIL01, TIL11 (*parviglumis*), TIL18, TIL25 (*mexicana*),
+RIMHU001 (*huehuetenangensis*), Gigi, Momo (*diploperennis*), PI615697 (*nicaraguensis*), RIL003
+(*luxurians*, Helixer annotation only).
+
+**How they were prepared (2026-10-05):** genomes and GFFs were already in `BZea/ref`. RIL003 genome
+decompressed from `.fa.gz` and its nucleotide BLAST DB built (job 1106909). Protein FASTAs
+downloaded from `download.maizegdb.org/<assembly>/` (RIL003: translated from the Helixer GFF with
+`gffread -y`), indexed with `samtools faidx` and `makeblastdb -dbtype prot -parse_seqids`
+(job 1106876, xfer partition). The prep scripts are not part of this repo.
+
+Laptop stub inputs (B73 + TIL18, ±200 kb around each gene) are in `tests/fixtures/`, made by
+`scripts/make_stub_fixtures.sh`.
+
+## Running
 
 ```bash
-cd /share/maize/$USER/geneprom
-sbatch container/build_container.sbatch            # once: builds /share/maize/$USER/apptainer/geneprom.sif
-sbatch scripts/render.sbatch                       # renders fd_promoter_primers.qmd -> docs/
+# laptop: wiring check on the stub fixtures
+quarto render fd_promoter_primers.qmd -P mode:stub --output-dir work/stub/render
+
+# hazel, from the checkout /rsstu/users/r/rrellan/BZea/geneprom
+sbatch container/build_container.sbatch   # when container/ changes: /share/maize/$USER/apptainer/geneprom.sif (xfer)
+sbatch scripts/render.sbatch              # full run -> results/, docs/fd_promoter_primers.html
 ```
 
 ## Layout
 
 ```
 fd_promoter_primers.qmd   # the pipeline — source of truth
-config/                   # accessions, Jia 2025 primers
-container/                # environment.yml, Apptainer recipe, build job
-scripts/                  # Slurm render job
-results/                  # tracked deliverables (primer tables, e-PCR hits, maps)
+config/                   # accessions, Jia 2025 primers, named B73 ferredoxins
+container/                # environment.yml (+ pinned lock), Apptainer recipe, build job
+scripts/                  # render job, stub-fixture script
+tests/fixtures/           # laptop stub inputs
+results/                  # tracked deliverables (orthologs, tree, primers, e-PCR hits, maps)
 docs/                     # rendered report
-data/  work/              # NOT tracked (symlinks to genomes; regenerated intermediates)
+work/                     # NOT tracked: regenerated intermediates
 ```
 
 ## Student TODOs (marked `TODO (student)` in the notebook)

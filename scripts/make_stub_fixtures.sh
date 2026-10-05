@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cut the laptop stub fixtures: B73 and TIL18, +-200 kb around ZmFd4 (chr2) and ZmFd9 (chr10).
 # Run once on the laptop: bash scripts/make_stub_fixtures.sh
-# Output (tracked, ~1.7 MB): tests/fixtures/{B73,TIL18}.fa + .gff3. Each slice is one FASTA record named
+# Output (tracked): tests/fixtures/{B73,TIL18}.fa + .fai + .gff3 + nucleotide BLAST DB. Each slice is one FASTA record named
 # after its chromosome; GFF coordinates are shifted to the slice so both files stay consistent.
 # Inputs: local B73 v5 (Ensembl naming "2", "10") and TIL18 genomes; the TIL18 GFF slice is read from hazel
 # (data only, by ssh, as allowed by the hpc-debug-loop rules).
@@ -39,4 +39,6 @@ slices | while IFS=$'\t' read -r acc src chr s e; do
   fi
 done
 samtools faidx "$OUT/B73.fa"; samtools faidx "$OUT/TIL18.fa"
+# BLAST DBs, built like the reference ones in BZea/ref (the notebook expects them as inputs)
+for acc in B73 TIL18; do makeblastdb -dbtype nucl -parse_seqids -in "$OUT/$acc.fa" -out "$OUT/$acc" -title "$acc stub" > /dev/null; done
 ls -la "$OUT"

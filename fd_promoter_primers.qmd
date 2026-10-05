@@ -73,34 +73,24 @@ if (length(miss)) stop("missing tools: ", paste(miss, collapse = ", "))
 cat(sprintf("mode = %s | %d accessions | reference dir %s\n", MODE, nrow(ACC), REF))
 ```
 
-## 1. Genomes: plain FASTA, index, BLAST database
+## 1. Inputs
 
-Genomes are read in place from `r REF`. A gzipped genome (RIL003) is decompressed once **next to
-its original** in `r REF` (e-PCR needs plain FASTA), so every project can reuse it. FASTA indexes and
-any missing BLAST DB are written to `work/`.
+The reference data are an **assumed starting point** (see README, "Inputs"): for every accession in
+`r REF`, a plain-FASTA genome with its nucleotide BLAST DB (`-parse_seqids`) and its gene annotation.
+Preparing them (download, decompression, indexing) is done once outside this notebook. Only the
+samtools `.fai` indexes are written here, to `work/`, so nothing is ever written to `r REF`.
 
 ```{r genomes}
 ACC <- ACC %>% mutate(
-  fa_src = file.path(REF, genome),
-  fa     = sub("\\.gz$", "", fa_src),                       # plain FASTA, same folder as the original
-  fai    = file.path(WORK, "fai", paste0(accession, ".fa.fai")),
-  gff    = file.path(REF, gff),
-  db_ref = sub("\\.fa(\\.gz)?$", "", fa_src))
-stopifnot(all(file.exists(ACC$fa_src)))
-
-for (i in seq_len(nrow(ACC))) with(ACC[i, ], {
-  if (fa != fa_src && !file.exists(fa))                     # write to .tmp, rename when complete
-    sh(sprintf("gzip -dc %s > %s.tmp && mv %s.tmp %s", shQuote(fa_src), shQuote(fa), shQuote(fa), shQuote(fa)))
-  if (!file.exists(fai)) sh(sprintf("samtools faidx --fai-idx %s %s", shQuote(fai), shQuote(fa)))
-})
+  fa  = file.path(REF, genome),
+  fai = file.path(WORK, "fai", paste0(accession, ".fa.fai")),
+  gff = file.path(REF, gff),
+  db  = sub("\\.fa$", "", fa))
 has_db <- function(p) any(file.exists(paste0(p, c(".nsq", ".nal", ".00.nsq"))))
-ACC$db <- map2_chr(ACC$db_ref, ACC$accession, function(p, a) {
-  if (has_db(p)) return(p)
-  w <- file.path(WORK, "blastdb", a)
-  if (!has_db(w)) sh(sprintf("makeblastdb -dbtype nucl -in %s -out %s",
-                             shQuote(ACC$fa[ACC$accession == a]), shQuote(w)))
-  w
-})
+no_db <- ACC$db[!map_lgl(ACC$db, has_db)]
+missing_in <- c(ACC$fa[!file.exists(ACC$fa)], ACC$gff[!file.exists(ACC$gff)], if (length(no_db)) paste(no_db, "(BLAST DB)"))
+if (length(missing_in)) stop("missing inputs (prepare them first, see README):\n", paste(missing_in, collapse = "\n"))
+for (i in seq_len(nrow(ACC))) with(ACC[i, ], if (!file.exists(fai)) sh(sprintf("samtools faidx --fai-idx %s %s", shQuote(fai), shQuote(fa))))
 
 grab <- function(acc, chr, s, e, rc = FALSE) {
   a <- ACC[ACC$accession == acc, ]
